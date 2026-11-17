@@ -1552,11 +1552,26 @@ namespace TABCoopMod.UI
         private static string BuildRoomCode()
         {
             int port = LocalTcpLoopbackTransport.DefaultPort;
-            // Physical adapter first — that is what a teammate on the same LAN/VPN will reach.
-            string lan = LocalTcpLoopbackTransport.GetPreferredLanAddress();
-            if (!string.IsNullOrEmpty(lan) && !lan.StartsWith("169.254.", StringComparison.Ordinal))
+
+            // 1) 虚拟网卡（Radmin / ZeroTier / Hamachi 等 VPN）地址优先：这是点对点组网地址，
+            //    对加入了同一个虚拟网络的队友一定可达 —— 即使双方物理上异地、隔了 CGNAT/NAT。
+            //    这是「异地联机」场景下唯一能连上的 IPv4 地址，所以必须排在物理网卡前面。
+            // 2) 其次物理网卡地址：同一局域网/同一路由器下的队友用它。
+            // 3) 最后公网 IPv6：异地且双方都有公网 IPv6 时用。
+            var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
+            foreach (var info in infos)
             {
-                return lan + ":" + port;
+                if (info.Rank == 1 && !info.Address.StartsWith("169.254.", StringComparison.Ordinal))
+                {
+                    return info.Address + ":" + port;
+                }
+            }
+            foreach (var info in infos)
+            {
+                if (info.Rank == 0 && !info.Address.StartsWith("169.254.", StringComparison.Ordinal))
+                {
+                    return info.Address + ":" + port;
+                }
             }
             string v6 = LocalTcpLoopbackTransport.GetPreferredGlobalIPv6();
             if (!string.IsNullOrEmpty(v6))
