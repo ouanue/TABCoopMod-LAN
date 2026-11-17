@@ -1228,10 +1228,11 @@ namespace TABCoopMod.UI
         /// <summary>Builds the "share this address" hint shown under the LAN host button.</summary>
         private static string BuildLanAddressHint()
         {
+            var v6Infos = LocalTcpLoopbackTransport.GetGlobalIPv6AddressInfos();
             var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
-            if (infos.Count == 0)
+            if (infos.Count == 0 && v6Infos.Count == 0)
             {
-                return $"局域网房间监听 0.0.0.0:{LocalTcpLoopbackTransport.DefaultPort}\n" +
+                return $"房间监听 {LocalTcpLoopbackTransport.DefaultPort} 端口（IPv4 + IPv6）\n" +
                        "未检测到可用 IP（请先连上 Wi-Fi 或网线）。";
             }
 
@@ -1246,13 +1247,34 @@ namespace TABCoopMod.UI
                 else invalid.Add(info.Display);
             }
 
-            string preferred = infos[0].Address;
             var sb = new System.Text.StringBuilder();
-            sb.Append("局域网房间监听 0.0.0.0:").Append(LocalTcpLoopbackTransport.DefaultPort).Append('\n');
-            sb.Append("把本机 IP 告诉队友: ").Append(preferred);
-            if (physical.Count > 1)
+            sb.Append("房间监听 ").Append(LocalTcpLoopbackTransport.DefaultPort).Append(" 端口（IPv4 + IPv6 双栈）\n");
+
+            // IPv6 is listed first on purpose: on a network behind carrier-grade NAT (IPv4 100.64/10,
+            // ISP does another NAT on top) no IPv4 address of ours is reachable from a remote
+            // teammate, while the global IPv6 address usually is.
+            if (v6Infos.Count > 0)
             {
-                sb.Append("\n同网卡其他地址: ").Append(string.Join(", ", physical.GetRange(1, physical.Count - 1).ToArray()));
+                sb.Append("异地联机把 IPv6 告诉队友: ").Append(v6Infos[0].Address);
+                if (v6Infos.Count > 1)
+                {
+                    var rest = new List<string>();
+                    for (int i = 1; i < v6Infos.Count; i++) rest.Add(v6Infos[i].Address);
+                    sb.Append("\n其他 IPv6: ").Append(string.Join(", ", rest.ToArray()));
+                }
+            }
+            else
+            {
+                sb.Append("本机没有全局 IPv6（异地联机需要它）");
+            }
+
+            if (physical.Count > 0)
+            {
+                sb.Append("\n同一局域网用 IPv4: ").Append(infos[0].Address);
+                if (physical.Count > 1)
+                {
+                    sb.Append("\n同网卡其他地址: ").Append(string.Join(", ", physical.GetRange(1, physical.Count - 1).ToArray()));
+                }
             }
             if (virtualOnes.Count > 0)
             {
@@ -1276,9 +1298,10 @@ namespace TABCoopMod.UI
         {
             _entryStatusMessage = string.Empty;
             string suggested = string.Empty;
-            // Prefill with the best physical adapter's subnet (host part stripped) so the teammate
-            // only has to type the last octet. Falls back to a virtual adapter only if no physical
-            // address exists — handing out a Radmin/ZeroTier prefix as the default was confusing.
+            // Prefill with the best physical adapter's IPv4 subnet (host part stripped) so the
+            // teammate only has to type the last octet. An IPv6 address is never truncated --
+            // half an IPv6 literal is worse than an empty box -- and handing out a Radmin/ZeroTier
+            // prefix as the default was confusing.
             string local = LocalTcpLoopbackTransport.GetPreferredLanAddress();
             if (!string.IsNullOrEmpty(local)) suggested = local;
             if (!string.IsNullOrEmpty(suggested))
@@ -1293,9 +1316,11 @@ namespace TABCoopMod.UI
             {
                 GameBridge.ShowInputBoxMessageBox(
                     "加入局域网房间",
-                    $"请输入房主的局域网 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）\n" +
-                    "支持 192.168.1.100 或 192.168.1.100:27099 两种写法。\n" +
-                    "注意：对方的 169.254.x.x 地址无效，虚拟网卡地址只在双方装了同一 VPN 时可用。" +
+                    $"请输入房主的 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）\n" +
+                    "同一局域网: 192.168.1.100 或 192.168.1.100:27099\n" +
+                    "异地联机: 240e:345:6789:abcd:1234:5678:9abc:def0\n" +
+                    "         （IPv6 带端口要加方括号 [240e::1]:27099）\n" +
+                    "注意：169.254.x.x 和 fe80:: 都不是可用地址。" +
                     (string.IsNullOrEmpty(hint) ? string.Empty : "\n" + hint),
                     suggested,
                     64,
@@ -1304,29 +1329,35 @@ namespace TABCoopMod.UI
                         string target = (text ?? string.Empty).Trim();
                         if (string.IsNullOrEmpty(target))
                         {
-                            _entryStatusMessage = "未输入局域网 IP，已取消。";
+                            _entryStatusMessage = "未输入 IP，已取消。";
                             RefreshUI();
                             return;
                         }
                         if (target.StartsWith("169.254.", StringComparison.Ordinal))
                         {
-                            _entryStatusMessage = $"169.254.x.x 是无效地址（网卡没拿到 IP），无法连接。请让对方运行 ipconfig 查看真正的 192.168.x.x 地址。";
+                            _entryStatusMessage = $"169.254.x.x 是无效地址（网卡没拿到 IP），无法连接。请让对方运行 ipconfig 查看真正的 192.168.x.x 或公网 IPv6 地址。";
+                            RefreshUI();
+                            return;
+                        }
+                        if (target.StartsWith("fe80:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _entryStatusMessage = "fe80:: 是链路本地地址，只在同一台交换机内有效，跨网络无法连接。请让对方提供公网 IPv6（240e: 开头）或局域网 IPv4。";
                             RefreshUI();
                             return;
                         }
                         try
                         {
                             CoopSessionManager.JoinSessionLan(target);
-                            _entryStatusMessage = $"正在连接局域网房主 {target} …";
+                            _entryStatusMessage = $"正在连接房主 {target} …";
                         }
                         catch (Exception ex)
                         {
-                            _entryStatusMessage = $"连接局域网房主失败: {ex.Message}";
+                            _entryStatusMessage = $"连接房主失败: {ex.Message}";
                             try { CoopSessionManager.StopSession(); } catch { }
                         }
                         RefreshUI();
                     },
-                    () => { _entryStatusMessage = "已取消加入局域网房间。"; RefreshUI(); },
+                    () => { _entryStatusMessage = "已取消加入房间。"; RefreshUI(); },
                     text => !string.IsNullOrWhiteSpace(text) && text.Trim().Length >= 7,
                     "AllCharactersExceptNewLines");
             }
@@ -1340,15 +1371,16 @@ namespace TABCoopMod.UI
         /// <summary>One-line "my own addresses" summary appended to the join dialog for troubleshooting.</summary>
         private static string BuildJoinDialogHint()
         {
-            var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
-            if (infos.Count == 0) return string.Empty;
             var parts = new List<string>();
+            var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
             foreach (var info in infos)
             {
                 if (info.Rank == 0) parts.Add(info.Display);
             }
+            var v6 = LocalTcpLoopbackTransport.GetGlobalIPv6AddressInfos();
+            if (v6.Count > 0) parts.Add("IPv6 " + v6[0].Address);
             if (parts.Count == 0) return string.Empty;
-            return "本机局域网地址: " + string.Join(", ", parts.ToArray());
+            return "本机地址: " + string.Join(", ", parts.ToArray());
         }
 
         /// <summary>
@@ -1414,8 +1446,9 @@ namespace TABCoopMod.UI
             try
             {
                 GameBridge.ShowInputBoxMessageBox(
-                    "测试局域网房主连通性",
-                    $"请输入房主的局域网 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）。\n" +
+                    "测试房主连通性",
+                    $"请输入房主的 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）。\n" +
+                    "同一局域网: 192.168.1.100    异地联机: 240e:345:...\n" +
                     "本操作只发送一个探测包，不会加入房间。\n" +
                     "如果这里显示“无响应”，说明对方的 27099 端口没有放行（防火墙）或 IP 不对。",
                     suggested,
@@ -1444,17 +1477,13 @@ namespace TABCoopMod.UI
 
         private static void ProbeLanHostAsync(string target)
         {
-            string host = target;
-            int port = LocalTcpLoopbackTransport.DefaultPort;
-            if (target.Contains(":"))
-            {
-                var parts = target.Split(':');
-                host = parts[0];
-                int parsed;
-                if (int.TryParse(parts[1], out parsed) && parsed > 0 && parsed <= 65535) port = parsed;
-            }
+            string host;
+            int port;
+            // Handles bare IPv6, "1.2.3.4:27099" and "[240e::1]:27099" without mangling colons.
+            LocalTcpLoopbackTransport.ParseEndpoint(target, LocalTcpLoopbackTransport.DefaultPort, out host, out port);
+            string display = LocalTcpLoopbackTransport.IsIPv6Literal(host) ? $"[{host}]:{port}" : $"{host}:{port}";
 
-            _entryStatusMessage = $"正在探测 {host}:{port} …";
+            _entryStatusMessage = $"正在探测 {display} …";
             RefreshUI();
 
             Task.Run(() =>
@@ -1464,8 +1493,8 @@ namespace TABCoopMod.UI
                 bool reachable = LocalTcpLoopbackTransport.ProbeLanHost(host, port, 1200, out result, out failure);
                 var probed = result;
                 _entryStatusMessage = reachable
-                    ? $"✅ {host}:{port} 可达 — 房主: {probed.HostName}，人数 {probed.PlayerCount}/{probed.MaxPlayers}，{DescribePhase((LobbyRoomPhase)probed.RoomPhase)}。现在可以点【加入局域网房间…】。"
-                    : $"❌ {host}:{port} 无响应 — {failure}。请确认房主已点【创建局域网房间】、IP 正确、并且房主的防火墙放行了 TCP {port}。";
+                    ? $"✅ {display} 可达 — 房主: {probed.HostName}，人数 {probed.PlayerCount}/{probed.MaxPlayers}，{DescribePhase((LobbyRoomPhase)probed.RoomPhase)}。现在可以点【加入局域网房间…】。"
+                    : $"❌ {display} 无响应 — {failure}。";
                 _needsRefresh = true;
             });
         }

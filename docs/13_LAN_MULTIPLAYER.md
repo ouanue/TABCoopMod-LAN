@@ -44,7 +44,51 @@ public enum CoopTransportMode { Steam = 0, LocalLoopback = 1, Lan = 2 }
 | --- | --- | --- | --- |
 | `Steam` | — | 仅 `TABCOOP_CHAOS` 时 | `!IsLanSession && !IsLocalLoopbackSession` |
 | `LocalLoopback` | `IPAddress.Loopback` | 默认包装 | `IsLocalLoopbackSession` |
-| `Lan` | `IPAddress.Any` | **不包装** | `IsLanSession` |
+| `Lan` | `IPAddress.Any` → **自动升级为 `IPv6Any` 双栈** | **不包装** | `IsLanSession` |
+
+---
+
+## 2.5 为什么必须做 IPv6 双栈（v2 新增，决定性）
+
+v1 只监听 IPv4（`new TcpListener(IPAddress.Any, 27099)`）。实测表明这在很多家庭宽带下**永远连不上，且与代码无关**：
+
+| 事实 | 实测值 |
+| --- | --- |
+| 光猫 PPPoE WAN 地址 | `100.64.11.159`（`100.64.0.0/10`，RFC 6598 **运营商级 NAT**） |
+| 实际公网 IPv4 出口 | `203.0.113.66`（`https://ipv4.icanhazip.com`） |
+| 结论 | 出口 ≠ 光猫 WAN → **运营商侧还有一层 NAT，双层 CGNAT** |
+
+双层 CGNAT 下 **IPv4 入站永远不可能**，在光猫上做端口映射也毫无意义（映射只到第一层 NAT）。但 IPv6 不受影响：
+
+| 事实 | 实测值 |
+| --- | --- |
+| 本机全局 IPv6 | `240e:345:6789:abcd:1234:5678:9abc:def0` |
+| 出站验证 | `curl -6 https://api64.ipify.org` 回显同一地址 |
+| 入站验证 | 双栈监听后自连 `[240e:…:583f]:27099` → `Established` |
+
+因此 v2 把 `Lan` 模式的监听改成**双栈**：
+
+```csharp
+var v6 = new TcpListener(IPAddress.IPv6Any, _port);
+v6.Server.DualMode = true;
+v6.Server.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, false);
+v6.Start();
+```
+
+`DualMode = true` + `IPv6Only = false` 让同一个端口同时接受 IPv4 与 IPv6 客户端，`LocalLoopback` 模式完全不受影响（它仍走 `IPAddress.Loopback` 分支）。
+
+配套改动：
+
+1. `ConnectToHost` 的 `TcpClient` **必须按目标地址族创建** —— 默认 `new TcpClient()` 是 IPv4 的，连 IPv6 字面量会抛 `发现的地址或指定的地址与套接字地址族都不匹配`（这是 v2 实测踩到的真实 bug）。
+   ```csharp
+   _clientToHost = IsIPv6Literal(host)
+       ? new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true }
+       : new TcpClient { NoDelay = true };
+   ```
+2. 端点解析改用 `ParseEndpoint`：`Split(':')` 会把 IPv6 切碎。支持 `1.2.3.4`、`1.2.3.4:27099`、裸 `240e:345::1`、`[240e:345::1]:27099`。
+3. `GetGlobalIPv6AddressInfos()` 过滤链路本地 `fe80::/10`、`fec0::/10`、回环、IPv4-mapped 与 ULA `fc00::/7`（ULA 只在同一组织内有效），只保留真正可跨公网的地址。
+4. `ProbeLanHost` 对 `fe80:` 开头直接给出"链路本地地址跨网络无效"的明确原因，而不是笼统的超时。
+5. 大厅地址面板把 IPv6 **排在 IPv4 之前**（CGNAT 下 IPv4 对异地队友无用），并提示"异地联机把 IPv6 告诉队友"。
 
 ---
 
@@ -57,6 +101,7 @@ public enum CoopTransportMode { Steam = 0, LocalLoopback = 1, Lan = 2 }
 ```csharp
 private readonly IPAddress _bindAddress;
 private readonly int _port;
+private bool _dualStack;
 private string _lastRemoteEndpoint = "127.0.0.1";
 
 public LocalTcpLoopbackTransport() : this(IPAddress.Loopback, DefaultPort) { }
@@ -66,45 +111,124 @@ public LocalTcpLoopbackTransport(IPAddress bindAddress, int port)
     _bindAddress = bindAddress ?? IPAddress.Loopback;
     _port = port > 0 && port <= 65535 ? port : DefaultPort;
 }
+
+public bool IsLanBound => _bindAddress != null && !IPAddress.IsLoopback(_bindAddress);
+public int Port => _port;
+public IPAddress BindAddress => _bindAddress;
 ```
 
-`StartHost` 原本：
+`StartHost` 原本硬编码回环：
 
 ```csharp
 _listener = new TcpListener(IPAddress.Loopback, DefaultPort);
 ```
 
-改为：
+改为**双栈监听**（`_bindAddress` 是 `IPAddress.Any` 时升级为 IPv6Any，见 §2.5）：
 
 ```csharp
-_listener = new TcpListener(_bindAddress, _port);
-```
-
-新增成员：
-
-```csharp
-public bool IsLanBound => _bindAddress != null && !IPAddress.IsLoopback(_bindAddress);
-public int Port => _port;
-public IPAddress BindAddress => _bindAddress;
-
-/// <summary>枚举本机可用于联机的 IPv4（Up 状态、非 Loopback、排除 127.*）。</summary>
-public static List<string> GetLocalIPv4Addresses();
-```
-
-`ConnectToHost` 补了一个原本缺失的分支：上游只认 `"host:port"`，传入纯 `"192.168.3.10"` 会被忽略。现在：
-
-```csharp
-if (parts.Length == 2 && int.TryParse(parts[1], out int parsed) && parsed > 0 && parsed <= 65535)
+if (IPAddress.Any.Equals(_bindAddress))
 {
-    host = parts[0].Trim();
-    port = parsed;
+    try
+    {
+        var v6 = new TcpListener(IPAddress.IPv6Any, _port);
+        v6.Server.DualMode = true;
+        v6.Server.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, false);
+        v6.Start();
+        _listener = v6;
+        _dualStack = true;
+    }
+    catch (Exception ex)
+    {
+        ModLogger.Warn($"[LocalTcpLoopbackTransport] Dual-stack listen failed ({ex.Message}); falling back to IPv4-only.");
+        _listener = new TcpListener(IPAddress.Any, _port);
+        _listener.Start();
+    }
 }
 else
 {
-    host = targetAddressOrSteamId.Trim();   // 纯 IP / 纯主机名
+    _listener = new TcpListener(_bindAddress, _port);
+    _listener.Start();
 }
-_lastRemoteEndpoint = $"{host}:{port}";
 ```
+
+**地址排序**（虚拟网卡不能排在物理网卡前面，否则大厅把 Radmin/ZeroTier 地址当成"本机 IP"发给队友）：
+
+```csharp
+public sealed class LocalAddressInfo
+{
+    public string Address;
+    public string AdapterName;
+    /// 0 = physical LAN/Wi-Fi, 1 = virtual adapter, 2 = APIPA / link-local
+    public int Rank;
+    public bool IsPhysical => Rank == 0;
+    public string Display => ...;   // "192.168.1.100 (WLAN)" / "虚拟网卡/Radmin VPN" / "无效地址"
+}
+
+private static readonly string[] VirtualAdapterMarkers =
+{
+    "radmin", "zerotier", "tailscale", "hamachi", "wg", "wireguard", "openvpn", "tap-",
+    "tap ", "tun", "vmware", "virtualbox", "vbox", "hyper-v", "vethernet", "loopback",
+    "npcap", "wintun", "softether", "pgyvpn", "pugongying", "蒲公英", "parallels"
+};
+
+public static List<LocalAddressInfo> GetLocalAddressInfos();   // rank 0 → 2 稳定排序
+public static List<string> GetLocalIPv4Addresses();            // 兼容旧签名
+public static string GetPreferredLanAddress();
+```
+
+**IPv6 枚举**只保留真正可跨公网的地址（过滤 `fe80::/10`、`fec0::/10`、回环、IPv4-mapped、ULA `fc00::/7`）：
+
+```csharp
+public sealed class LocalV6AddressInfo { public string Address; public string AdapterName; public int PrefixLength; ... }
+private static bool IsGlobalIPv6(IPAddress addr);
+public static List<LocalV6AddressInfo> GetGlobalIPv6AddressInfos();
+public static string GetPreferredGlobalIPv6();
+public static bool IsIPv6Literal(string text);
+```
+
+**端点解析**（`Split(':')` 会把 IPv6 切碎，必须专用解析器）：
+
+```csharp
+/// 支持 "1.2.3.4"、"1.2.3.4:27099"、裸 "240e:345::1"、"240e:345::1:27099"、"[240e:345::1]:27099"
+public static void ParseEndpoint(string input, int defaultPort, out string host, out int port);
+```
+
+`ConnectToHost` 三处改动 —— 端点解析、**地址族匹配**（默认 `new TcpClient()` 是 IPv4，连 IPv6 会抛"地址族不匹配"）、有界连接：
+
+```csharp
+ParseEndpoint(targetAddressOrSteamId, _port, out host, out port);
+
+_lastRemoteEndpoint = IsIPv6Literal(host) ? $"[{host}]:{port}" : $"{host}:{port}";
+_clientToHost = IsIPv6Literal(host)
+    ? new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true }
+    : new TcpClient { NoDelay = true };
+
+IAsyncResult ar = _clientToHost.BeginConnect(host, port, null, null);
+if (!ar.AsyncWaitHandle.WaitOne(ConnectTimeoutMs))   // 5000 ms
+{
+    throw new TimeoutException($"连接 {_lastRemoteEndpoint} 超时（{ConnectTimeoutMs} ms 无响应）。…");
+}
+```
+
+**防火墙自动放行**（Windows 默认丢弃入站 TCP，对客机来说和"没人监听"完全一样）：
+
+```csharp
+public enum FirewallOpenResult { AlreadyPresent, Created, Failed, NotAttempted }
+public static string FirewallStatus { get; }             // 面板显示用
+public static string BuildFirewallCommand(int port);
+public static bool FirewallRuleExists(int port);
+public static FirewallOpenResult EnsureFirewallOpen(int port);          // 非提权尝试
+public static bool EnsureFirewallOpenElevated(int port);                // UAC 提权
+```
+
+**带原因的探测**（上游 `ProbeLocalHost` 把所有失败都吞成 `IsOnline = false`，无法远程排障）：
+
+```csharp
+public static bool ProbeLanHost(string host, int port, int timeoutMs,
+                                out LocalProbeResult result, out string failure);
+```
+
+区分：未填地址 / DNS 失败 / APIPA 无效地址 / **fe80:: 链路本地无效** / 超时 / 连接被拒 / 网络不可达 / 连上但无回包 / 包类型不对。
 
 诊断字符串按绑定情况切换，避免在 LAN 会话里显示误导性的 `Local Loopback (127.0.0.1)`：
 
@@ -243,20 +367,36 @@ public static object ShowInputBoxMessageBox(string title, string message, string
 | 空输入 | `未填写 IP 地址` |
 | DNS 失败 | `无法解析主机名: ...` |
 | `169.254.*` | `169.254.x.x 是无效地址（对方网卡没拿到 IP）` |
-| 连接超时 | `连接超时（{n} ms 内没有任何响应），通常是对方防火墙拦掉了 TCP 27099` |
+| **`fe80:*`** | **`fe80:: 是链路本地地址，只在同一台交换机内有效，跨网络无法连接`** |
+| 连接超时 | IPv6 目标：`连接超时（n ms 内没有任何响应）。检查：① 房主是否点了【创建局域网房间】② 房主的 Windows 防火墙是否放行了 TCP 27099（IPv6 也需要放行）③ IPv6 地址是否抄错`；IPv4 目标另加 `④ 双方是否在不同网络（异地联机请用 IPv6 地址）` |
 | `ConnectionRefused` | `连接被拒绝（对方主机在线但 27099 端口没有监听）` |
 | `HostUnreachable` | `网络不可达（该 IP 与本机不在同一网络）` |
 | 连上无回包 | `TCP 已连上，但对方没有回应探测包（端口被别的程序占用）` |
 | 包类型不符 | `对方端口有响应，但不是本 mod 的房主（返回包类型={pktType}）` |
 
-`BuildLanAddressHint()` 输出形如：
+探测客户端也按目标地址族创建，否则 IPv6 目标会抛"地址族不匹配"：
+
+```csharp
+private static TcpClient CreateProbeClient(string host, int timeoutMs)
+{
+    IPAddress parsed;
+    bool isV6 = IPAddress.TryParse(host, out parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6;
+    var client = isV6 ? new TcpClient(AddressFamily.InterNetworkV6) : new TcpClient();
+    client.NoDelay = true;
+    client.ReceiveTimeout = timeoutMs;
+    client.SendTimeout = timeoutMs;
+    return client;
+}
+```
+
+`BuildLanAddressHint()` 输出形如（**IPv6 排在 IPv4 之前**，因为 CGNAT 下 IPv4 对异地队友无用）：
 
 ```
-局域网房间监听 0.0.0.0:27099
-把本机 IP 告诉队友: 192.168.1.100
-虚拟网卡(VPN): 虚拟网卡/Radmin VPN (26.178.89.181)
-防火墙: 未能自动放行（需要管理员权限）
-管理员命令: netsh advfirewall firewall add rule name="TABCoopMod LAN 27099" dir=in ...
+房间监听 27099 端口（IPv4 + IPv6 双栈）
+异地联机把 IPv6 告诉队友: 240e:345:6789:abcd:1234:5678:9abc:def0
+同一局域网用 IPv4: 192.168.1.100
+虚拟网卡(VPN): 虚拟网卡/Radmin VPN (26.1.2.3)
+防火墙: 未检测
 ```
 
 `JoinLanRoomClicked()` 预填**物理网卡**同网段前缀（`GetPreferredLanAddress()`，不再取 `localIps[0]`），减少手输：
@@ -264,9 +404,15 @@ public static object ShowInputBoxMessageBox(string title, string message, string
 ```csharp
 GameBridge.ShowInputBoxMessageBox(
     "加入局域网房间",
-    "请输入房主的局域网 IP（默认端口 27099）\n支持 192.168.1.100 或 192.168.1.100:27099 两种写法。",
+    "请输入房主的 IP（默认端口 27099）\n" +
+    "同一局域网: 192.168.1.100 或 192.168.1.100:27099\n" +
+    "异地联机: 240e:345:6789:abcd:1234:5678:9abc:def0\n" +
+    "         （IPv6 带端口要加方括号 [240e::1]:27099）\n" +
+    "注意：169.254.x.x 和 fe80:: 都不是可用地址。",
     suggested, 64, onOk, onCancel, validator, "AllCharactersExceptNewLines");
 ```
+
+输入框的 `onOk` 在连接前做两级拦截：`169.254.` 开头 → 提示无效地址；`fe80:` 开头 → 提示链路本地地址跨网络无效。`ProbeLanHostAsync()` 也改用 `ParseEndpoint()`，`[240e::1]:27099` 不再被 `Split(':')` 切碎。
 
 `ConnectToHost` 改为有界连接（`BeginConnect` + `WaitOne(ConnectTimeoutMs)`，5 秒），超时抛带排障提示的 `TimeoutException`，而不是让 UI 无限期挂住。
 
@@ -337,23 +483,29 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 | 项 | 证据 |
 | --- | --- |
 | 绑定非回环 | `netstat` → `0.0.0.0:27099 Listen`；日志 `Host listening on 0.0.0.0:27099 (Lan=True)` |
-| 跨网卡可达 | `Test-NetConnection 192.168.3.10:27099` = True；虚拟网卡 `26.x.x.x:27099` = True |
+| 跨网卡可达 | `Test-NetConnection 192.168.1.100:27099` = True；虚拟网卡 `26.x.x.x:27099` = True |
 | 跨进程握手 | 客机日志 `HandshakeAccepted! LocalPlayerId=2, Peers=2, HostVer=0.1.5-LAN` |
 | 双端房间状态 | 两端 `peers` 均含 2 人，客机 `ready=true`，房主 `canStart=true` |
-| UI 显示 | 客机 `角色: 客机 P2 \| 链路: LAN (192.168.3.10:27099) \| RTT: 22ms` |
+| UI 显示 | 客机 `角色: 客机 P2 \| 链路: LAN (192.168.1.100:27099) \| RTT: 22ms` |
 | 纯手动入口 | 不借助任何钩子，点【创建局域网房间】即监听 `0.0.0.0:27099` |
 | 引擎输入框 | 点【加入局域网房间…】正常弹出，预填网段前缀，可编辑可确认 |
 | 绑定完整性 | `ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing)`，`Classes OK=64, failed-tolerant=0` |
 | 构建 | 0 warning / 0 error |
-| **地址排序**（v2） | 日志 `LAN host ready. Share this address with clients: 192.168.3.10, 26.178.89.181, 169.254.16.41, 169.254.101.12:27099` — 物理 WLAN 排首位，虚拟网卡与 APIPA 在后 |
-| **连通性探测**（v2） | `probe_lan 192.168.3.10:27099` → `✅ 可达 — 房主: HostPlayer，人数 1/3，等候大厅中` |
-| **失败诊断**（v2） | `probe_lan 192.168.1.3:27099` → `❌ 无响应 — 连接超时（1200 ms 内没有任何响应），通常是对方防火墙拦掉了 TCP 27099，或该 IP 不是房主` |
+| **地址排序**（v2） | 日志 `LAN host ready. Share this address with clients: 192.168.1.100, 26.1.2.3, 169.254.1.1, 169.254.2.2:27099` — 物理 WLAN 排首位，虚拟网卡与 APIPA 在后 |
+| **连通性探测**（v2） | `probe_lan 192.168.1.100:27099` → `✅ 可达 — 房主: HostPlayer，人数 1/3，等候大厅中` |
+| **失败诊断**（v2） | `probe_lan 192.168.1.3:27099` → `❌ 无响应 — 连接超时（1200 ms 内没有任何响应）…` |
+| **IPv6 双栈监听**（v2） | 日志 `Host listening on 0.0.0.0:27099 (Lan=True, DualStack=True)`；`Get-NetTCPConnection` → `LocalAddress = ::`（IPv6Any） |
+| **IPv6 地址枚举**（v2） | 日志 `LAN host ready (dual-stack). IPv4: 192.168.1.100, … :27099 \| IPv6: 240e:345:6789:abcd:1111:2222:3333:4444, 240e:345:6789:abcd:1234:5678:9abc:def0` |
+| **IPv6 入站可达**（v2） | 自连全局地址 → `IPv6 connect OK`；`Test-NetConnection 240e:…:583f -Port 27099` = `True` |
+| **IPv6 端到端进房**（v2） | 客机 `TABCOOP_LAN_HOST=[240e:345:…:583f]:27099` → `sessionActive=true, localPlayerId=2, peers=2, RTT≈266ms`；房主侧 `Get-NetTCPConnection` → `240e:…:583f:…:583f Established` |
+| **IPv6 探测**（v2） | `probe_lan [240e:345:…:583f]` → `✅ [240e:…]:27099 可达 — 房主: HostPlayer，人数 1/3，等候大厅中` |
+| **地址族修复**（v2） | 修复前客机报 `发现的地址或指定的地址与套接字地址族都不匹配`；`TcpClient(AddressFamily.InterNetworkV6)` 后连接成功 |
 
 ### 5.2 尚未验证（交由真实双机测试）
 
-1. **跨物理机**。上述握手是同机双进程经真实局域网 IP 完成的（真套接字、真网卡绑定，非回环捷径），协议层面等价，但未经过真实路由/交换/防火墙/ARP。
-2. **"UI 点按钮 → 输 IP → 成功进房"这条完整人工链路**。组件各自已验证（按钮可用、输入框可弹可编辑、`JoinSessionLan` 可由钩子成功连接），但三者串起来一次性走通的记录尚未留痕。
-3. **进游戏后的同步**。只验证到"进大厅"；真实开局、快照分块传输、30Hz 锁步在 LAN 上的表现未测。同步逻辑本身未改动（本次只改连接建立与绑定地址），故预期不劣于回环模式。
+1. **真正的两台物理机**。上述 IPv6 端到端是同机双进程经**真实公网 IPv6 地址**完成的（`240e:…:583f` → 同一地址，走完整 TCP/IP 栈，非回环捷径），协议与防火墙路径等价，但未经过真实运营商链路与对方机器的防火墙。
+2. **对方机器的防火墙**。若朋友那侧启用了 Windows 防火墙且没有放行规则，IPv6 入站同样会被丢弃 —— 需要对方也运行放行脚本（`friend-lan-kit/TABCoopMod_LAN_一键放行.bat`）。
+3. **进游戏后的同步**。只验证到"进大厅"；真实开局、快照分块传输、30Hz 锁步在 LAN/IPv6 上的表现未测。同步逻辑本身未改动（本次只改连接建立与绑定地址），故预期不劣于回环模式。
 4. **UAC 提权路径**。`EnsureFirewallOpenElevated()` 的 UAC 弹窗在自动化环境里无法点按，只验证到非提权路径失败并正确降级为提示手动命令。
 
 ---
@@ -362,9 +514,10 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 
 局域网模式的"连不上"绝大多数不是 mod 的问题。按下面顺序查，每一步都能得到确定答案：
 
+0. **先判断你们是不是同一个网络**。`tracert -d <对方IP>`：第一跳就是对方 → 同一局域网，填 IPv4 即可。第一跳是网关、第二跳才到对方 → 中间隔着 NAT，见第 1 步。**如果对方是异地朋友（各自在不同城市的宽带），"局域网"根本不成立，请直接跳到第 7 步用 IPv6。**
 1. **先弄清谁该当房主**。执行 `tracert -d <对方IP>`：如果第一跳就是自己的网关、第二跳才是对方，说明两台机器中间隔着路由器 NAT —— **只能由外层（离公网更近）那台当房主，内层那台出站连接**。内层当房主时，外层永远连不进来（除非做端口映射）。
-2. **确认 IP 类型**。房主在自己的大厅左栏看到 `把本机 IP 告诉队友: 192.168.x.x` 才是可用地址。`169.254.*` 是网卡没拿到 DHCP，无效；`26.*` / `10.*` 常是 Radmin/ZeroTier 虚拟网卡，只在双方都装了同一 VPN 时才通。
-3. **用【测试局域网房主连通性】**。这一步只发一个探测包，不占端口也不建房。三条典型输出：
+2. **确认 IP 类型**。房主在自己的大厅左栏看到 `同一局域网用 IPv4: 192.168.x.x` 才是可用地址。`169.254.*` 是网卡没拿到 DHCP，无效；`26.*` / `10.*` 常是 Radmin/ZeroTier 虚拟网卡，只在双方都装了同一 VPN 时才通。
+3. **用【测试房主连通性】**。这一步只发一个探测包，不占端口也不建房。三条典型输出：
 
    | 输出 | 含义 | 下一步 |
    | --- | --- | --- |
@@ -378,11 +531,23 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
    netsh advfirewall firewall add rule name="TABCoopMod LAN 27099" dir=in action=allow protocol=TCP localport=27099
    ```
 
-   放行后大厅左栏会显示 `防火墙: 已放行`。
+   放行后大厅左栏会显示 `防火墙: 已放行`。**IPv6 入站同样受 Windows 防火墙管辖，也必须放行。**
 
 5. **`ping` 不通不代表网络不通**。Windows 默认丢弃 ICMP，所以 `ping` 超时完全正常；判断依据永远是 TCP（第 3 步的探测，或 `Test-NetConnection <IP> -Port 27099`）。
 
 6. **实在不在同一网络**就用虚拟局域网兜底：双方装同一个 ZeroTier / Tailscale / Radmin 网络，然后填虚拟网卡地址。此时两端都在同一虚拟的二层网络里，防火墙仍是唯一门槛。
+
+7. **异地联机优先用 IPv6**（v2 新增）。先检查有没有公网 IPv6：
+
+   ```powershell
+   Get-NetIPAddress -AddressFamily IPv6 | Where-Object { $_.IPAddress -notlike 'fe80*' -and $_.IPAddress -notlike 'fd*' }
+   ```
+
+   `240e:` / `2408:` / `2409:` 等以 `2` 开头的就是公网地址。房主大厅左栏会直接显示 `异地联机把 IPv6 告诉队友: 240e:…`，队友把这一整串粘进【加入局域网房间…】即可（带端口要写成 `[240e::1]:27099`）。
+
+   > **为什么不能靠 IPv4**：很多家庭宽带是双层 CGNAT（光猫 WAN 是 `100.64/10`，运营商侧还做了一层 NAT），IPv4 入站永远不可达，在光猫上做端口映射也没用。判断方法：`curl https://ipv4.icanhazip.com` 的返回值与光猫 WAN 口地址不同 → 就是双层 CGNAT。此情况下只有 IPv6 可行。
+
+   若完全没有公网 IPv6（`Get-NetIPAddress` 里只有 `fe80::`），就只能回到第 6 步用虚拟局域网。
 
 ---
 
@@ -390,13 +555,15 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 
 - **两台版本必须一致**（都是 `v0.1.5-LAN`）。混装上游客机，握手报版本不匹配。
 - **端口固定 27099**，暂不可配。UI 未暴露端口输入；`StartHostSessionLan(int port)` 已在 API 层留了口子。
-- **无 NAT 穿透**。LAN 模式是裸 TCP 直连，只适用于同一局域网或已组好的虚拟局域网（Radmin / ZeroTier / Tailscale / 蒲公英）。跨公网需要端口转发。
+- **IPv4 无法穿透双层 CGNAT**。`Lan` 模式是裸 TCP 直连，不做 NAT 穿透。同一局域网/虚拟局域网用 IPv4 即可；异地联机必须走 IPv6（见 §2.5、§5.5 第 7 步），或双方组虚拟局域网。
+- **IPv6 需要运营商分配公网前缀**。`GetNetIPAddress` 只有 `fe80::` 时说明没有公网 IPv6（部分宽带默认关闭），此时只能靠虚拟局域网。
 - **不对称可达**。若两台机器之间隔着一层路由器 NAT（`tracert` 第一跳是网关、第二跳才到对方），只有内层能连外层，外层连不进内层。这是网络拓扑决定的，mod 不做端口映射也不会自动穿透 —— 请让外层那台当房主。详见 §5.5。
-- **无 UPnP 自动映射**。上游 `DirectFastPath` 里的 UPnP/STUN 只服务于 Steam P2P 链路，LAN 模式不复用；实测很多家用网关根本不响应 SSDP。
-- **防火墙规则需要管理员权限**。游戏进程默认非提权，自动放行会失败并降级为 UAC 弹窗或手动命令提示。
-- **无传输加密**。TcpLoopback 上游就没有加密（原设计假定回环或 Steam 隧道），LAN 模式沿用了这一前提。在可信局域网内没有问题，**不要在不可信网络上使用**。
+- **无 UPnP 自动映射**。上游 `DirectFastPath` 里的 UPnP/STUN 只服务于 Steam P2P 链路，LAN 模式不复用；实测很多家用网关根本不响应 SSDP，且 CGNAT 下映射本身也无效。
+- **防火墙规则需要管理员权限**。游戏进程默认非提权，自动放行会失败并降级为 UAC 弹窗或手动命令提示。IPv4 与 IPv6 入站都受同一规则管辖。
+- **无传输加密**。TcpLoopback 上游就没有加密（原设计假定回环或 Steam 隧道），LAN 模式沿用了这一前提。在可信网络内没有问题，**不要在不可信网络上使用**（IPv6 公网直连同样明文）。
 - **`IsLocalLoopbackSession` 语义收窄**。任何依赖它"判断是否为 TCP 传输"的外部代码需改用 `UnwrapTransport() is LocalTcpLoopbackTransport`。本次已同步检查 `ControlServer`、`TestingLifecyclePatches`、`AllyOverlayRenderer`，无遗漏。
 - **`ActivePathSummary` 在客机侧**取连接时记录的 `_lastRemoteEndpoint`，若房主地址变化需重连才会更新。
+- **双栈监听可能失败并静默降级**。极端情况下（系统禁用 IPv6、端口被独占）会回退 IPv4-only 并打 `Dual-stack listen failed (...); falling back to IPv4-only.` 警告 —— 此时异地 CGNAT 用户连不上，日志里能看到原因。
 
 ---
 

@@ -649,8 +649,21 @@ namespace TABCoopMod.Sync
             if (mode == CoopTransportMode.Lan)
             {
                 var ips = LocalTcpLoopbackTransport.GetLocalIPv4Addresses();
-                ModLogger.Info($"[CoopSessionManager] LAN host ready. Share this address with clients: " +
-                               $"{(ips.Count > 0 ? string.Join(", ", ips) : "<no LAN IPv4 found>")}:{port}");
+                var v6 = LocalTcpLoopbackTransport.GetGlobalIPv6AddressInfos();
+                string v6Text = "<none>";
+                if (v6.Count > 0)
+                {
+                    var v6List = new List<string>();
+                    foreach (var info in v6) v6List.Add(info.Address);
+                    v6Text = string.Join(", ", v6List.ToArray());
+                }
+                ModLogger.Info($"[CoopSessionManager] LAN host ready (dual-stack). IPv4: " +
+                               $"{(ips.Count > 0 ? string.Join(", ", ips) : "<no LAN IPv4 found>")}:{port} | IPv6: {v6Text}");
+                if (v6.Count == 0)
+                {
+                    ModLogger.Warn("[CoopSessionManager] No global IPv6 address found. A remote teammate behind " +
+                                   "carrier-grade NAT will NOT be able to connect; only players on the same LAN/VPN can.");
+                }
             }
             LobbyStateChanged?.Invoke();
         }

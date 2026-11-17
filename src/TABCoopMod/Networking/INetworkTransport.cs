@@ -108,6 +108,7 @@ namespace TABCoopMod.Networking
         private readonly IPAddress _bindAddress;
         private readonly int _port;
         private TcpListener _listener;
+        private bool _dualStack;
         private readonly List<(TcpClient Client, NetworkStream Stream, long AcceptedAtTicks)> _pendingAccepts = new List<(TcpClient, NetworkStream, long)>();
         private readonly List<(byte PlayerId, TcpClient Client, NetworkStream Stream)> _clients = new List<(byte, TcpClient, NetworkStream)>();
         private TcpClient _clientToHost;
@@ -159,7 +160,7 @@ namespace TABCoopMod.Networking
             public int Rank;
             public bool IsPhysical { get { return Rank == 0; } }
 
-            /// <summary>Short label used in the lobby, e.g. "192.168.3.10 (WLAN)".</summary>
+            /// <summary>Short label used in the lobby, e.g. "192.168.1.100 (WLAN)".</summary>
             public string Display
             {
                 get
@@ -259,6 +260,182 @@ namespace TABCoopMod.Networking
                 }
             }
             return ordered;
+        }
+
+        /// <summary>
+        /// One globally routable IPv6 address of this machine.
+        /// Behind carrier-grade NAT (IPv4 100.64/10 plus an upstream ISP NAT) IPv6 is often the
+        /// only address family on which a peer can reach this host at all, so the lobby surfaces
+        /// these next to the IPv4 candidates.
+        /// </summary>
+        public sealed class LocalV6AddressInfo
+        {
+            public string Address;
+            public string AdapterName;
+            public int PrefixLength;
+
+            public string Display
+            {
+                get
+                {
+                    return string.IsNullOrEmpty(AdapterName) ? Address : Address + " (" + AdapterName + ")";
+                }
+            }
+        }
+
+        private static bool IsGlobalIPv6(IPAddress addr)
+        {
+            if (addr == null || addr.AddressFamily != AddressFamily.InterNetworkV6) return false;
+            if (addr.IsIPv6LinkLocal) return false;   // fe80::/10 needs a scope id, useless to a peer
+            if (addr.IsIPv6SiteLocal) return false;   // fec0::/10 (deprecated)
+            if (IPAddress.IPv6Loopback.Equals(addr)) return false;
+            if (IPAddress.IPv6Any.Equals(addr)) return false;
+            if (addr.IsIPv4MappedToIPv6) return false;
+
+            byte[] b = addr.GetAddressBytes();
+            // fc00::/7 unique-local addresses only work inside one organisation, never across the
+            // Internet, so they are not useful for joining a friend's room.
+            if ((b[0] & 0xFE) == 0xFC) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Enumerates globally routable IPv6 addresses (2000::/3 and anything else not link-local,
+        /// loopback or unique-local), physical adapters first.
+        /// </summary>
+        public static List<LocalV6AddressInfo> GetGlobalIPv6AddressInfos()
+        {
+            var list = new List<LocalV6AddressInfo>();
+            try
+            {
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni == null) continue;
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    IPInterfaceProperties props;
+                    try { props = ni.GetIPProperties(); }
+                    catch { continue; }
+                    if (props == null) continue;
+
+                    string adapterName = ni.Name ?? string.Empty;
+                    string description = string.Empty;
+                    try { description = ni.Description ?? string.Empty; } catch { }
+                    bool virtualAdapter = LooksVirtual(adapterName, description);
+
+                    foreach (var ua in props.UnicastAddresses)
+                    {
+                        if (ua == null || ua.Address == null) continue;
+                        if (!IsGlobalIPv6(ua.Address)) continue;
+                        string s = ua.Address.ToString();
+                        if (string.IsNullOrEmpty(s)) continue;
+
+                        bool dup = false;
+                        foreach (var existing in list)
+                        {
+                            if (existing.Address == s) { dup = true; break; }
+                        }
+                        if (dup) continue;
+
+                        list.Add(new LocalV6AddressInfo
+                        {
+                            Address = s,
+                            AdapterName = virtualAdapter ? "虚拟网卡/" + adapterName : adapterName,
+                            PrefixLength = ua.PrefixLength
+                        });
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            // Physical adapters first.
+            var ordered = new List<LocalV6AddressInfo>(list.Count);
+            foreach (var info in list)
+            {
+                if (info.AdapterName != null && info.AdapterName.StartsWith("虚拟网卡/", StringComparison.Ordinal)) continue;
+                ordered.Add(info);
+            }
+            foreach (var info in list)
+            {
+                if (info.AdapterName != null && info.AdapterName.StartsWith("虚拟网卡/", StringComparison.Ordinal)) ordered.Add(info);
+            }
+            return ordered;
+        }
+
+        /// <summary>Best global IPv6 address of this machine, or an empty string when there is none.</summary>
+        public static string GetPreferredGlobalIPv6()
+        {
+            var infos = GetGlobalIPv6AddressInfos();
+            if (infos.Count > 0) return infos[0].Address;
+            return string.Empty;
+        }
+
+        /// <summary>True when <paramref name="text"/> looks like a bare IPv6 literal.</summary>
+        public static bool IsIPv6Literal(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            IPAddress parsed;
+            return IPAddress.TryParse(text.Trim(), out parsed)
+                   && parsed.AddressFamily == AddressFamily.InterNetworkV6;
+        }
+
+        /// <summary>
+        /// Splits "host", "host:port", "1.2.3.4:27099", "fe80::1" or "[240e:345::1]:27099" into a
+        /// connectable host string and a port. Bare IPv6 literals contain colons, so a naive
+        /// Split(':') would mangle them; braced forms are therefore required when a port is given.
+        /// </summary>
+        public static void ParseEndpoint(string input, int defaultPort, out string host, out int port)
+        {
+            host = "127.0.0.1";
+            port = defaultPort > 0 ? defaultPort : DefaultPort;
+            if (string.IsNullOrEmpty(input)) return;
+
+            string text = input.Trim();
+            if (text.Length == 0) return;
+
+            // [ipv6]:port  /  [ipv6]
+            if (text[0] == '[')
+            {
+                int close = text.IndexOf(']');
+                if (close > 0)
+                {
+                    host = text.Substring(1, close - 1).Trim();
+                    if (close + 1 < text.Length && text[close + 1] == ':')
+                    {
+                        int parsedPort;
+                        string portText = text.Substring(close + 2).Trim();
+                        if (int.TryParse(portText, out parsedPort) && parsedPort > 0 && parsedPort <= 65535)
+                        {
+                            port = parsedPort;
+                        }
+                    }
+                    return;
+                }
+            }
+
+            // A bare IPv6 literal (two or more colons, no brackets) is only a host.
+            int colonCount = 0;
+            for (int i = 0; i < text.Length; i++) { if (text[i] == ':') colonCount++; }
+            if (colonCount >= 2)
+            {
+                host = text;
+                return;
+            }
+
+            if (colonCount == 1)
+            {
+                int idx = text.IndexOf(':');
+                string h = text.Substring(0, idx).Trim();
+                string portText = text.Substring(idx + 1).Trim();
+                int parsedPort;
+                if (h.Length > 0) host = h;
+                if (int.TryParse(portText, out parsedPort) && parsedPort > 0 && parsedPort <= 65535) port = parsedPort;
+                return;
+            }
+
+            host = text;
         }
 
         /// <summary>
@@ -485,10 +662,37 @@ namespace TABCoopMod.Networking
             _peers.Clear();
             _peers.Add(new PeerInfo { PlayerId = 1, PlayerName = "HostPlayer", IsReady = true });
 
-            _listener = new TcpListener(_bindAddress, _port);
-            _listener.Start();
+            // Dual-stack hosting. Binding only IPAddress.Any (IPv4) makes the room unreachable for
+            // anyone whose path to us is IPv6 -- which is the common case behind carrier-grade NAT
+            // (IPv4 100.64/10), where the host has a routable 240e::/IPv6 address but no reachable
+            // IPv4 address at all. IPv6Any with DualMode=true accepts IPv4 *and* IPv6 clients on the
+            // same port, and still leaves Loopback-only sessions untouched.
+            if (IPAddress.Any.Equals(_bindAddress))
+            {
+                try
+                {
+                    var v6 = new TcpListener(IPAddress.IPv6Any, _port);
+                    v6.Server.DualMode = true;
+                    v6.Server.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, false);
+                    v6.Start();
+                    _listener = v6;
+                    _dualStack = true;
+                }
+                catch (Exception ex)
+                {
+                    ModLogger.Warn($"[LocalTcpLoopbackTransport] Dual-stack listen failed ({ex.Message}); falling back to IPv4-only.");
+                    _listener = new TcpListener(IPAddress.Any, _port);
+                    _listener.Start();
+                }
+            }
+            else
+            {
+                _listener = new TcpListener(_bindAddress, _port);
+                _listener.Start();
+            }
+
             IsActive = true;
-            ModLogger.Info($"[LocalTcpLoopbackTransport] Host listening on {_bindAddress}:{_port} (Lan={IsLanBound})");
+            ModLogger.Info($"[LocalTcpLoopbackTransport] Host listening on {_bindAddress}:{_port} (Lan={IsLanBound}, DualStack={_dualStack})");
 
             if (IsLanBound)
             {
@@ -505,22 +709,18 @@ namespace TABCoopMod.Networking
             LocalPlayerId = 0; // Assigned by Host upon HandshakeAccept
             _peers.Clear();
 
-            string host = "127.0.0.1";
-            int port = _port;
-            if (!string.IsNullOrEmpty(targetAddressOrSteamId) && targetAddressOrSteamId.Contains(":"))
-            {
-                var parts = targetAddressOrSteamId.Split(':');
-                host = parts[0];
-                int parsed;
-                if (int.TryParse(parts[1], out parsed) && parsed > 0 && parsed <= 65535) port = parsed;
-            }
-            else if (!string.IsNullOrEmpty(targetAddressOrSteamId))
-            {
-                host = targetAddressOrSteamId.Trim();
-            }
+            string host;
+            int port;
+            // ParseEndpoint understands "1.2.3.4", "1.2.3.4:27099", bare IPv6 ("240e:345::1")
+            // and bracketed IPv6 with a port ("[240e:345::1]:27099").
+            ParseEndpoint(targetAddressOrSteamId, _port, out host, out port);
 
-            _lastRemoteEndpoint = $"{host}:{port}";
-            _clientToHost = new TcpClient { NoDelay = true };
+            _lastRemoteEndpoint = IsIPv6Literal(host) ? $"[{host}]:{port}" : $"{host}:{port}";
+            // The socket family must match the target. A default TcpClient() is IPv4-only and
+            // throws ArgumentException ("address family not supported") for an IPv6 literal.
+            _clientToHost = IsIPv6Literal(host)
+                ? new TcpClient(AddressFamily.InterNetworkV6) { NoDelay = true }
+                : new TcpClient { NoDelay = true };
             try
             {
                 // Bounded connect: a wrong IP or a firewalled host must surface as a clear error
@@ -532,7 +732,7 @@ namespace TABCoopMod.Networking
                     try { _clientToHost.Close(); } catch { }
                     _clientToHost = null;
                     throw new TimeoutException(
-                        $"连接 {host}:{port} 超时（{ConnectTimeoutMs} ms 无响应）。" +
+                        $"连接 {_lastRemoteEndpoint} 超时（{ConnectTimeoutMs} ms 无响应）。" +
                         "请确认房主已点【创建局域网房间】、双方在同一网段、" +
                         "且房主放行了 TCP 27099 防火墙。");
                 }
@@ -547,14 +747,14 @@ namespace TABCoopMod.Networking
                 try { if (_clientToHost != null) _clientToHost.Close(); } catch { }
                 _clientToHost = null;
                 throw new InvalidOperationException(
-                    $"无法连接 {host}:{port} — {ex.Message}。" +
+                    $"无法连接 {_lastRemoteEndpoint} — {ex.Message}。" +
                     "请确认房主已创建局域网房间、IP 填写正确、且未被防火墙拦截。", ex);
             }
 
             _streamToHost = _clientToHost.GetStream();
             IsActive = true;
 
-            ModLogger.Info($"[LocalTcpLoopbackTransport] Connected to Host at {host}:{port}, sending HandshakeRequest...");
+            ModLogger.Info($"[LocalTcpLoopbackTransport] Connected to Host at {_lastRemoteEndpoint}, sending HandshakeRequest...");
             SendToPeer(1, SendChannel.ReliableCommand, PacketType.HandshakeRequest, w =>
             {
                 w.Write(Environment.UserName ?? "ClientPlayer");
@@ -772,13 +972,29 @@ namespace TABCoopMod.Networking
             }
         }
 
+        /// <summary>
+        /// Creates a TcpClient whose socket family matches the target, so an IPv6 literal is not
+        /// sent through an IPv4-only socket (which fails with AddressFamilyNotSupported instead of
+        /// a useful result).
+        /// </summary>
+        private static TcpClient CreateProbeClient(string host, int timeoutMs)
+        {
+            IPAddress parsed;
+            bool isV6 = IPAddress.TryParse(host, out parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6;
+            var client = isV6 ? new TcpClient(AddressFamily.InterNetworkV6) : new TcpClient();
+            client.NoDelay = true;
+            client.ReceiveTimeout = timeoutMs;
+            client.SendTimeout = timeoutMs;
+            return client;
+        }
+
         public static LocalProbeResult ProbeLocalHost(string host = "127.0.0.1", int port = DefaultPort, int timeoutMs = 250)
         {
             var result = new LocalProbeResult { IsOnline = false };
             TcpClient tcp = null;
             try
             {
-                tcp = new TcpClient { NoDelay = true, ReceiveTimeout = timeoutMs, SendTimeout = timeoutMs };
+                tcp = CreateProbeClient(host, timeoutMs);
                 var iar = tcp.BeginConnect(host, port, null, null);
                 if (!iar.AsyncWaitHandle.WaitOne(timeoutMs))
                     return result;
@@ -835,7 +1051,9 @@ namespace TABCoopMod.Networking
             }
 
             IPAddress parsedIp;
-            if (!IPAddress.TryParse(host, out parsedIp))
+            bool targetIsV6 = IPAddress.TryParse(host, out parsedIp)
+                              && parsedIp.AddressFamily == AddressFamily.InterNetworkV6;
+            if (!targetIsV6 && !IPAddress.TryParse(host, out parsedIp))
             {
                 // Allow a plain hostname too, but surface DNS failures clearly.
                 try
@@ -860,13 +1078,23 @@ namespace TABCoopMod.Networking
                 return false;
             }
 
+            // A link-local fe80:: address needs a zone id and never crosses a router, so a peer
+            // cannot be reached through it.
+            if (targetIsV6 && parsedIp.IsIPv6LinkLocal)
+            {
+                failure = "fe80:: 是链路本地地址，只在同一台交换机内有效，跨网络无法连接";
+                return false;
+            }
+
             try
             {
-                tcp = new TcpClient { NoDelay = true, ReceiveTimeout = timeoutMs, SendTimeout = timeoutMs };
+                tcp = CreateProbeClient(host, timeoutMs);
                 IAsyncResult iar = tcp.BeginConnect(host, port, null, null);
                 if (!iar.AsyncWaitHandle.WaitOne(timeoutMs))
                 {
-                    failure = $"连接超时（{timeoutMs} ms 内没有任何响应），通常是对方防火墙拦掉了 TCP {port}，或该 IP 不是房主";
+                    failure = targetIsV6
+                        ? $"连接超时（{timeoutMs} ms 内没有任何响应）。检查：① 房主是否点了【创建局域网房间】 ② 房主的 Windows 防火墙是否放行了 TCP {port}（IPv6 也需要放行） ③ IPv6 地址是否抄错"
+                        : $"连接超时（{timeoutMs} ms 内没有任何响应）。检查：① 房主是否点了【创建局域网房间】 ② 房主的 Windows 防火墙是否放行了 TCP {port} ③ IP 是否抄错 ④ 双方是否在不同网络（异地联机请用 IPv6 地址）";
                     return false;
                 }
 

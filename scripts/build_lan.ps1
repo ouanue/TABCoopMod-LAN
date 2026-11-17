@@ -1,4 +1,4 @@
-# TABCoopMod — LAN 版构建脚本
+﻿# TABCoopMod — LAN 版构建脚本
 #
 # 用途：在本机一键还原依赖并编译出 TABCoopMod.dll（含局域网联机功能）。
 #
