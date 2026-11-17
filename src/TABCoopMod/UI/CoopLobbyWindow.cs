@@ -672,9 +672,11 @@ namespace TABCoopMod.UI
             _btnCopyRoomCode = CreateNativeButton("复制房间码", rightX, ry, 30, CopyRoomCodeClicked, smallFont: true);
             _roomView.AddObject(_btnCopyRoomCode);
 
-            float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
-            _btnDisbandRoom = CreateNativeButton("解散房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
+            ry += _btnCopyRoomCode.Height + gapY;
+            _btnDisbandRoom = CreateNativeButton("解散房间", rightX, ry, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnDisbandRoom);
+
+            float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
 
             // Client controls share the right column when !IsHost
             _btnClientReady = CreateNativeButton("进入准备状态", rightX, 40f * u, -30, ClientReadyClicked);
