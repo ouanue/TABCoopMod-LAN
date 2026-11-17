@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>《亿万僵尸》多人执政官模式 — 同种子新局平衡性全景对比报告</title>
+  <style>
+    :root {
+      --bg: #0c0e11;
+      --panel: #151921;
+      --panel-2: #1b212c;
+      --border: #2e3746;
+      --brass: #d4a656;
+      --brass-bright: #f0c975;
+      --brass-dim: rgba(212, 166, 86, 0.16);
+      --text: #e6ebf2;
+      --muted: #93a0b4;
+      --green: #4cd48c;
+      --red: #f26b6b;
+      --cyan: #59c8f0;
+      --amber: #f2a94d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top center, #1a202c 0%, var(--bg) 55%);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      line-height: 1.6;
+    }
+    .container { max-width: 1500px; margin: 0 auto; padding: 28px 24px 64px; }
+    header.hero {
+      background: linear-gradient(135deg, rgba(28,34,46,0.95), rgba(16,19,25,0.98));
+      border: 1px solid rgba(212,166,86,0.35);
+      border-radius: 14px;
+      padding: 28px 32px;
+      margin-bottom: 24px;
+      box-shadow: 0 18px 44px rgba(0,0,0,0.45);
+    }
+    .hero-tag {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      color: var(--brass-bright);
+      background: var(--brass-dim);
+      border: 1px solid rgba(212,166,86,0.4);
+      margin-bottom: 10px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .hero-sub { color: var(--muted); margin: 0 0 22px; max-width: 980px; }
+    .hero-sub code { color: var(--brass-bright); background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 4px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .kpi {
+      background: rgba(12,14,17,0.65);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi .val { font-size: 20px; font-weight: 700; color: var(--brass-bright); margin: 4px 0; }
+    .kpi .desc { font-size: 12.5px; color: var(--muted); }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 16px;
+      position: sticky;
+      top: 12px;
+      z-index: 20;
+      backdrop-filter: blur(10px);
+    }
+    .tabs, .view-modes { display: flex; flex-wrap: wrap; gap: 8px; }
+    button.pill {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.16s ease;
+    }
+    button.pill:hover { border-color: var(--brass); color: var(--brass-bright); }
+    button.pill.active {
+      background: linear-gradient(135deg, #c79542, #a27327);
+      color: #111;
+      border-color: var(--brass-bright);
+    }
+
+    .scenario-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px;
+      margin-bottom: 28px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+    }
+    .sc-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 14px;
+      margin-bottom: 18px;
+    }
+    .sc-title { margin: 0; font-size: 21px; color: #fff; }
+    .sc-meta { font-size: 13px; color: var(--brass-bright); font-family: Consolas, monospace; margin-top: 4px; }
+    .sc-note {
+      background: rgba(212,166,86,0.08);
+      border-left: 3px solid var(--brass);
+      padding: 10px 14px;
+      border-radius: 0 8px 8px 0;
+      color: #d7dee9;
+      font-size: 13.5px;
+      margin-bottom: 18px;
+    }
+
+    .side-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 18px;
+      margin-bottom: 20px;
+    }
+    .pano-box {
+      background: #0b0d10;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .pano-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .mode-pill {
+      padding: 2px 8px;
+      border-radius: 5px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .mode-vanilla { background: rgba(147,160,180,0.2); color: #dce3ee; }
+    .mode-coop2p { background: rgba(89,200,240,0.2); color: var(--cyan); }
+    .mode-coop3p { background: rgba(240,201,117,0.22); color: var(--brass-bright); }
+    .pano-img-wrap {
+      position: relative;
+      cursor: zoom-in;
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      background: #050607;
+    }
+    .pano-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: transform 0.25s ease;
+    }
+    .pano-img-wrap:hover img { transform: scale(1.02); }
+    .zoom-hint {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      background: rgba(12,14,17,0.82);
+      color: var(--brass-bright);
+      border: 1px solid rgba(212,166,86,0.45);
+      border-radius: 6px;
+      padding: 3px 9px;
+      font-size: 11.5px;
+      pointer-events: none;
+    }
+    .pano-foot {
+      padding: 10px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      font-size: 12.5px;
+      color: var(--muted);
+    }
+    .pano-foot strong { color: var(--text); }
+
+    .swipe-shell { margin-bottom: 20px; }
+    .swipe-controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .swipe-stage {
+      position: relative;
+      width: 100%;
+      max-width: 820px;
+      aspect-ratio: 1 / 1;
+      margin: 0 auto;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(212,166,86,0.45);
+      user-select: none;
+      cursor: ew-resize;
+      background: #050607;
+    }
+    .swipe-stage img {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      pointer-events: none;
+    }
+    .swipe-top {
+      position: absolute;
+      inset: 0;
+      clip-path: inset(0 50% 0 0);
+      pointer-events: none;
+    }
+    .swipe-divider {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 2px;
+      background: var(--brass-bright);
+      box-shadow: 0 0 12px rgba(240,201,117,0.8);
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+    .swipe-knob {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #f0c975, #b4812b);
+      color: #111;
+      font-weight: 900;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.65);
+      pointer-events: none;
+      font-size: 14px;
+    }
+    .swipe-badge {
+      position: absolute;
+      top: 12px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      background: rgba(12,14,17,0.84);
+      border: 1px solid rgba(255,255,255,0.16);
+      pointer-events: none;
+    }
+    .swipe-badge.left { left: 12px; color: #e2e8f0; }
+    .swipe-badge.right { right: 12px; color: var(--brass-bright); border-color: rgba(212,166,86,0.5); }
+
+    table.metrics {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: #101319;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    table.metrics th, table.metrics td {
+      padding: 9px 12px;
+      border-bottom: 1px solid rgba(46,55,70,0.65);
+      text-align: right;
+    }
+    table.metrics th:first-child, table.metrics td:first-child { text-align: left; }
+    table.metrics thead th {
+      background: var(--panel-2);
+      color: var(--brass-bright);
+      font-weight: 600;
+    }
+    table.metrics tbody tr:hover { background: rgba(255,255,255,0.03); }
+    .delta {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: Consolas, monospace;
+    }
+    .delta.up { background: rgba(76,212,140,0.14); color: var(--green); }
+    .delta.down { background: rgba(242,107,107,0.16); color: var(--red); }
+    .delta.flat { background: rgba(147,160,180,0.14); color: var(--muted); }
+
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(5,6,8,0.92);
+      z-index: 100;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .lightbox.open { display: flex; }
+    .lightbox-top {
+      width: 100%;
+      max-width: 1100px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      color: var(--brass-bright);
+      font-weight: 600;
+    }
+    .lightbox img {
+      max-width: min(94vw, 1080px);
+      max-height: 86vh;
+      border-radius: 8px;
+      border: 1px solid rgba(212,166,86,0.45);
+      box-shadow: 0 18px 50px rgba(0,0,0,0.8);
+    }
+    footer {
+      margin-top: 28px;
+      padding: 18px 22px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    footer code { color: var(--brass-bright); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header class="hero">
+    <div class="hero-tag">TABCoopMod · Archon Co-op Balance Verification</div>
+    <h1>《亿万僵尸》多人执政官模式 — 同种子新局全景与数值对比报告</h1>
+    <p class="hero-sub">
+      基于游戏原生全景生成器 <code>ZXSystemGameLevel.#=z5NVIUf3bnsHNNo8FfA==</code>（2048×2048 无迷雾日光渲染）实机采集。
+      对比<strong>同一随机种子</strong>下 <strong>原版单人 (256)</strong>、<strong>双人执政官 (280)</strong> 与 <strong>三人执政官 (304)</strong> 的地形格局、可建面积、开局兵力、资源分布及尸潮密度变化；存档读档、自定义地图与社区挑战保持原版零改动。
+    </p>
+    <div class="kpi-grid">
+      <div class="kpi">
+        <div class="label">地图尺寸与可玩区域</div>
+        <div class="val">256 → 280 → 304 格</div>
+        <div class="desc">可建造边长 148 → 164 (+22.8%面积) → 178 (+44.7%面积)</div>
+      </div>
+      <div class="kpi">
+        <div class="label">保守开局兵力投放</div>
+        <div class="val">4R+1S → 6R+1S → 6R+2S</div>
+        <div class="desc">2P 仅加 2 游侠，3P 再加 1 士兵；不削弱前期双/三线探路与防守张力</div>
+      </div>
+      <div class="kpi">
+        <div class="label">指挥中心基础加成</div>
+        <div class="val">+2 工人 / +3 工人 +1 食物</div>
+        <div class="desc">抵消多人协同初期建筑节奏波动，不破坏科技树与人口门限</div>
+      </div>
+      <div class="kpi">
+        <div class="label">感染城镇缩放策略</div>
+        <div class="val">按比例扩大城镇尺寸</div>
+        <div class="desc">1.094x (2P) / 1.188x (3P) 扩建单城半径，避免 900% 巨城被粗暴翻倍</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <div class="tabs" id="scenarioTabs"></div>
+    <div class="view-modes" id="viewModes">
+      <button class="pill active" data-mode="side">并排全景对比</button>
+      <button class="pill" data-mode="swipe">互动卷帘叠图对比</button>
+    </div>
+  </div>
+
+  <main id="app"></main>
+
+  <footer>
+    <strong>实机验证记录：</strong>
+    全量 4 场景共 10 张 <code>2048×2048</code> 全景图及实体统计均通过 <code>scripts/generate_panorama_comparisons.ps1</code> 实机生成（数据文件：<code>reports/panorama_metrics.json</code>）。
+    双端联机 E2E 已通过 <code>scripts/verify_new_survival_balance.ps1</code>：2P <code>Balanced</code> 主客机一致生成 <code>NCells=280</code>、<code>6R+1S</code>、<code>+2 工人</code> 且运行 <code>StateChecksum</code> 全程 <code>MATCH</code>；返回大厅切回 <code>Vanilla</code> 后一致回退 <code>NCells=256</code>、<code>4R+1S</code>，全日志 0 错误。
+  </footer>
+</div>
+
+<div class="lightbox" id="lightbox">
+  <div class="lightbox-top">
+    <span id="lightboxCaption">全景大图预览 (2048×2048)</span>
+    <button class="pill" id="lightboxClose">关闭 (Esc)</button>
+  </div>
+  <img id="lightboxImg" src="" alt="Panorama Full View" />
+</div>
+
+<script>
+const SCENARIOS = [
+  {
+    "id": "br_100",
+    "subtitle": "Seed 202601 | Pop 1.0x | Duration 1.0x | Vanilla (256) vs 2P (280) vs 3P (304)",
+    "title": "BR 100% Standard Survival",
+    "factorDuration": 1,
+    "variants": [
+      {
+        "sizeKB": 508,
+        "metrics": {
+          "survivalNCells": 256,
+          "gridNCells": 256,
+          "playableAreaWidth": 148,
+          "theme": "BR",
+          "seed": -1337994273,
+          "ccExtraWorkers": 0,
+          "ccExtraFood": 0,
+          "rangers": 4,
+          "soldiers": 1,
+          "zombiesTotal": 5198,
+          "giants": 1,
+          "mutants": 1,
+          "doomVillages": 7,
+          "oilSources": 15,
+          "pickables": 21,
+          "terrainTreeCells": 1451,
+          "terrainGoldCells": 148,
+          "terrainStoneCells": 369,
+          "terrainIronCells": 158,
+          "levelEventsCount": 6
+        },
+        "mode": "vanilla",
+        "image": "panoramas/br_100_vanilla.jpg"
+      },
+      {
+        "sizeKB": 539.5,
+        "metrics": {
+          "survivalNCells": 280,
+          "gridNCells": 512,
+          "playableAreaWidth": 164,
+          "theme": "BR",
+          "seed": -1337994273,
+          "ccExtraWorkers": 2,
+          "ccExtraFood": 0,
+          "rangers": 6,
+          "soldiers": 1,
+          "zombiesTotal": 9849,
+          "giants": 1,
+          "mutants": 1,
+          "doomVillages": 7,
+          "oilSources": 14,
+          "pickables": 21,
+          "terrainTreeCells": 1956,
+          "terrainGoldCells": 111,
+          "terrainStoneCells": 605,
+          "terrainIronCells": 290,
+          "levelEventsCount": 6
+        },
+        "mode": "coop2p",
+        "image": "panoramas/br_100_coop2p.jpg"
+      },
+      {
+        "sizeKB": 546.8,
+        "metrics": {
+          "survivalNCells": 304,
+          "gridNCells": 512,
+          "playableAreaWidth": 178,
+          "theme": "BR",
+          "seed": -1337994273,
+          "ccExtraWorkers": 3,
+          "ccExtraFood": 1,
+          "rangers": 6,
+          "soldiers": 2,
+          "zombiesTotal": 11485,
+          "giants": 1,
+          "mutants": 1,
+          "doomVillages": 7,
+          "oilSources": 16,
+          "pickables": 31,
+          "terrainTreeCells": 2128,
+          "terrainGoldCells": 186,
+          "terrainStoneCells": 685,
+          "terrainIronCells": 315,
+          "levelEventsCount": 6
+        },
+        "mode": "coop3p",
+        "image": "panoramas/br_100_coop3p.jpg"
+      }
+    ],
+    "theme": "BR",
+    "seed": 202601,
+    "factorPop": 1,
+    "cnTitle": "暗黑荒原 · 100% 标准生存",
+    "badge": "Dark Moorland (BR)",
+    "note": "标准地图生态与地形基准（已按比例修正非 2 的幂次地图感染镇外环距离上限）：同一种子下 2P（280 格）可建造宽度由 148 升至 164，3P（304 格）升至 178；游荡僵尸从 5,198 分别攀升至 9,849（+89.5%）与 11,485（+121.0%），且 2P/3P 感染城镇均稳定落回中环、建筑完整保持 7 座。"
+  },
+  {
+    "id": "ds_120",
+    "subtitle": "Seed 202602 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 2P (280)",
+    "title": "DS 120% Arid Highlands",
+    "factorDuration": 1,
+    "variants": [
+      {
+        "sizeKB": 924.3,
+        "metrics": {
+          "survivalNCells": 256,
+          "gridNCells": 256,
+          "playableAreaWidth": 148,
+          "theme": "DS",
+          "seed": 202602,
+          "ccExtraWorkers": 0,
+          "ccExtraFood": 0,
+          "rangers": 4,
+          "soldiers": 1,
+          "zombiesTotal": 13067,
+          "giants": 2,
+          "mutants": 6,
+          "doomVillages": 64,
+          "oilSources": 18,
+          "pickables": 30,
+          "terrainTreeCells": 3213,
+          "terrainGoldCells": 84,
+          "terrainStoneCells": 417,
+          "terrainIronCells": 318,
+          "levelEventsCount": 6
+        },
+        "mode": "vanilla",
+        "image": "panoramas/ds_120_vanilla.jpg"
+      },
+      {
+        "sizeKB": 964.1,
+        "metrics": {
+          "survivalNCells": 280,
+          "gridNCells": 512,
+          "playableAreaWidth": 164,
+          "theme": "DS",
+          "seed": 202602,
+          "ccExtraWorkers": 2,
+          "ccExtraFood": 0,
+          "rangers": 6,
+          "soldiers": 1,
+          "zombiesTotal": 17370,
+          "giants": 2,
+          "mutants": 8,
+          "doomVillages": 55,
+          "oilSources": 19,
+          "pickables": 31,
+          "terrainTreeCells": 3473,
+          "terrainGoldCells": 79,
+          "terrainStoneCells": 602,
+          "terrainIronCells": 373,
+          "levelEventsCount": 6
+        },
+        "mode": "coop2p",
+        "image": "panoramas/ds_120_coop2p.jpg"
+      }
+    ],
+    "theme": "DS",
+    "seed": 202602,
+    "factorPop": 1.2,
+    "cnTitle": "干旱高地 · 120% 多村密集",
+    "badge": "Arid Highlands (DS)",
+    "note": "干旱高地自带多座高密度村庄：外环距离修正后，2P（280 格）三座感染村镇均自然分布于可建造区中环而非被挤到地图边缘（55 座建筑），僵尸总量 13,067 -> 17,370（+32.9%），巨人维持 2 只、突变体 6 -> 8 只，石矿由 417 提升至 602（+44.4%）。"
+  },
+  {
+    "id": "fa_120",
+    "subtitle": "Seed 202603 | Pop 1.2x | Duration 1.0x | Vanilla (256) vs 3P (304)",
+    "title": "FA 120% Frozen Tundra",
+    "factorDuration": 1,
+    "variants": [
+      {
+        "sizeKB": 693,
+        "metrics": {
+          "survivalNCells": 256,
+          "gridNCells": 256,
+          "playableAreaWidth": 148,
+          "theme": "FA",
+          "seed": 202603,
+          "ccExtraWorkers": 0,
+          "ccExtraFood": 0,
+          "rangers": 4,
+          "soldiers": 1,
+          "zombiesTotal": 9769,
+          "giants": 0,
+          "mutants": 0,
+          "doomVillages": 3,
+          "oilSources": 11,
+          "pickables": 17,
+          "terrainTreeCells": 3613,
+          "terrainGoldCells": 91,
+          "terrainStoneCells": 223,
+          "terrainIronCells": 119,
+          "levelEventsCount": 6
+        },
+        "mode": "vanilla",
+        "image": "panoramas/fa_120_vanilla.jpg"
+      },
+      {
+        "sizeKB": 760.5,
+        "metrics": {
+          "survivalNCells": 304,
+          "gridNCells": 512,
+          "playableAreaWidth": 178,
+          "theme": "FA",
+          "seed": 202603,
+          "ccExtraWorkers": 3,
+          "ccExtraFood": 1,
+          "rangers": 6,
+          "soldiers": 2,
+          "zombiesTotal": 17448,
+          "giants": 0,
+          "mutants": 0,
+          "doomVillages": 7,
+          "oilSources": 12,
+          "pickables": 23,
+          "terrainTreeCells": 5706,
+          "terrainGoldCells": 113,
+          "terrainStoneCells": 449,
+          "terrainIronCells": 235,
+          "levelEventsCount": 6
+        },
+        "mode": "coop3p",
+        "image": "panoramas/fa_120_coop3p.jpg"
+      }
+    ],
+    "theme": "FA",
+    "seed": 202603,
+    "factorPop": 1.2,
+    "cnTitle": "寒冰荒原 · 120% 严寒高阻",
+    "badge": "Frozen Wastelands (FA)",
+    "note": "大面积冻土与山体分割地形下，3P 模式（304 格）带来 +57.9% 森林植被（3,613 -> 5,706）与约翻倍的石矿/铁矿（223 -> 449 / 119 -> 235），游荡僵尸 9,769 -> 17,448（+78.6%），感染村镇同样完整位于中环（7 座）。"
+  },
+  {
+    "id": "vo_900",
+    "subtitle": "Seed 202604 | Pop 1.5x | Duration 0.8x | Vanilla (256) vs 2P (280) vs 3P (304)",
+    "title": "VO 900% Caustic Nightmare",
+    "factorDuration": 0.8,
+    "variants": [
+      {
+        "sizeKB": 754.4,
+        "metrics": {
+          "survivalNCells": 256,
+          "gridNCells": 256,
+          "playableAreaWidth": 148,
+          "theme": "VO",
+          "seed": 202604,
+          "ccExtraWorkers": 0,
+          "ccExtraFood": 0,
+          "rangers": 4,
+          "soldiers": 1,
+          "zombiesTotal": 15652,
+          "giants": 6,
+          "mutants": 12,
+          "doomVillages": 81,
+          "oilSources": 9,
+          "pickables": 20,
+          "terrainTreeCells": 3223,
+          "terrainGoldCells": 177,
+          "terrainStoneCells": 200,
+          "terrainIronCells": 83,
+          "levelEventsCount": 6
+        },
+        "mode": "vanilla",
+        "image": "panoramas/vo_900_vanilla.jpg"
+      },
+      {
+        "sizeKB": 788.1,
+        "metrics": {
+          "survivalNCells": 280,
+          "gridNCells": 512,
+          "playableAreaWidth": 164,
+          "theme": "VO",
+          "seed": 202604,
+          "ccExtraWorkers": 2,
+          "ccExtraFood": 0,
+          "rangers": 6,
+          "soldiers": 1,
+          "zombiesTotal": 22295,
+          "giants": 6,
+          "mutants": 15,
+          "doomVillages": 95,
+          "oilSources": 8,
+          "pickables": 29,
+          "terrainTreeCells": 4476,
+          "terrainGoldCells": 268,
+          "terrainStoneCells": 355,
+          "terrainIronCells": 169,
+          "levelEventsCount": 6
+        },
+        "mode": "coop2p",
+        "image": "panoramas/vo_900_coop2p.jpg"
+      },
+      {
+        "sizeKB": 810.2,
+        "metrics": {
+          "survivalNCells": 304,
+          "gridNCells": 512,
+          "playableAreaWidth": 178,
+          "theme": "VO",
+          "seed": 202604,
+          "ccExtraWorkers": 3,
+          "ccExtraFood": 1,
+          "rangers": 6,
+          "soldiers": 2,
+          "zombiesTotal": 25952,
+          "giants": 9,
+          "mutants": 18,
+          "doomVillages": 115,
+          "oilSources": 15,
+          "pickables": 25,
+          "terrainTreeCells": 5019,
+          "terrainGoldCells": 313,
+          "terrainStoneCells": 289,
+          "terrainIronCells": 174,
+          "levelEventsCount": 6
+        },
+        "mode": "coop3p",
+        "image": "panoramas/vo_900_coop3p.jpg"
+      }
+    ],
+    "theme": "VO",
+    "seed": 202604,
+    "factorPop": 1.5,
+    "cnTitle": "剧毒荒原 · 900% 末日极限",
+    "badge": "Caustic Lands (VO)",
+    "note": "实证「缩放巨型村镇半径而非数量翻倍」策略与外环距离修正：原版已有一整片巨大僵尸城（81 座感染建筑），Co-op 按比例温和扩大单座城镇尺寸并稳定置于中环（2P 95 座 / +17.3%，3P 115 座 / +42.0%），僵尸总量 15,652 -> 22,295 / 25,952。"
+  }
+];
+
+const MODE_LABELS = {
+  vanilla: { name: '原版单人 (Vanilla)', cls: 'mode-vanilla' },
+  coop2p: { name: '双人执政官 (2P Balanced)', cls: 'mode-coop2p' },
+  coop3p: { name: '三人执政官 (3P Balanced)', cls: 'mode-coop3p' }
+};
+
+let activeScenario = 'all';
+let activeView = 'side';
+
+function pctBadge(val, base) {
+  if (base === 0) return val === 0 ? '<span class="delta flat">0%</span>' : `<span class="delta up">+${val}</span>`;
+  const pct = ((val - base) / base) * 100;
+  if (Math.abs(pct) < 0.05) return '<span class="delta flat">±0%</span>';
+  const sign = pct > 0 ? '+' : '';
+  const cls = pct > 0 ? 'up' : 'down';
+  return `<span class="delta ${cls}">${sign}${pct.toFixed(1)}%</span>`;
+}
+
+function fmtNum(n) { return typeof n === 'number' ? n.toLocaleString('zh-CN') : n; }
+
+function renderTabs() {
+  const tabs = document.getElementById('scenarioTabs');
+  const btns = [{ id: 'all', label: '全部场景 (4)' }, ...SCENARIOS.map(s => ({ id: s.id, label: s.cnTitle.split(' · ')[0] + ' ' + s.theme }))];
+  tabs.innerHTML = btns.map(b => `<button class="pill ${activeScenario === b.id ? 'active' : ''}" data-sc="${b.id}">${b.label}</button>`).join('');
+  tabs.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeScenario = btn.dataset.sc;
+      renderTabs();
+      renderMain();
+    });
+  });
+}
+
+function renderSwipeWidget(sc) {
+  const vanilla = sc.variants.find(v => v.mode === 'vanilla');
+  const targets = sc.variants.filter(v => v.mode !== 'vanilla');
+  const defaultRight = targets[targets.length - 1];
+  const uid = 'swipe_' + sc.id;
+  return `
+    <div class="swipe-shell" id="${uid}">
+      <div class="swipe-controls">
+        <span>拖动金色滑块对比<strong>同一种子</strong>原版与执政官地图（左：原版 256 / 右：选中配置）</span>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span>右侧对比层：</span>
+          ${targets.map(t => `<button class="pill ${t.mode === defaultRight.mode ? 'active' : ''}" data-right="${t.mode}">${MODE_LABELS[t.mode].name}</button>`).join('')}
+        </div>
+      </div>
+      <div class="swipe-stage" data-pos="50">
+        <img class="img-right" src="${defaultRight.image}" alt="Right Panorama" />
+        <div class="swipe-top">
+          <img class="img-left" src="${vanilla.image}" alt="Left Panorama" />
+        </div>
+        <div class="swipe-divider"></div>
+        <div class="swipe-knob">↔</div>
+        <span class="swipe-badge left">原版 256 格 (${vanilla.metrics.playableAreaWidth}w)</span>
+        <span class="swipe-badge right" data-right-label>${MODE_LABELS[defaultRight.mode].name} (${defaultRight.metrics.playableAreaWidth}w)</span>
+      </div>
+    </div>
+  `;
+}
+
+function wireSwipe(shell, sc) {
+  const stage = shell.querySelector('.swipe-stage');
+  const topLayer = shell.querySelector('.swipe-top');
+  const divider = shell.querySelector('.swipe-divider');
+  const knob = shell.querySelector('.swipe-knob');
+  const imgRight = shell.querySelector('.img-right');
+  const rightBadge = shell.querySelector('[data-right-label]');
+
+  const setPos = (pct) => {
+    pct = Math.max(2, Math.min(98, pct));
+    topLayer.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+    divider.style.left = pct + '%';
+    knob.style.left = pct + '%';
+  };
+
+  let dragging = false;
+  const updateFromClientX = (cx) => {
+    const rect = stage.getBoundingClientRect();
+    const pct = ((cx - rect.left) / rect.width) * 100;
+    setPos(pct);
+  };
+  stage.addEventListener('pointerdown', (e) => { dragging = true; stage.setPointerCapture(e.pointerId); updateFromClientX(e.clientX); });
+  stage.addEventListener('pointermove', (e) => { if (dragging) updateFromClientX(e.clientX); });
+  stage.addEventListener('pointerup', () => { dragging = false; });
+
+  shell.querySelectorAll('button[data-right]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      shell.querySelectorAll('button[data-right]').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const chosen = sc.variants.find(v => v.mode === btn.dataset.right);
+      imgRight.src = chosen.image;
+      rightBadge.textContent = `${MODE_LABELS[chosen.mode].name} (${chosen.metrics.playableAreaWidth}w)`;
+    });
+  });
+}
+
+function renderMetricsTable(sc) {
+  const base = sc.variants[0].metrics;
+  const rows = [
+    ['目标地图尺寸 (NCells)', v => `${v.survivalNCells} 格`, false],
+    ['可建造区边长 (World Units)', v => v.playableAreaWidth, true],
+    ['开局兵力 (游侠 + 士兵)', v => `${v.rangers}R + ${v.soldiers}S`, false],
+    ['指挥中心附加 (工人 / 食物)', v => `+${v.ccExtraWorkers} 工人 / +${v.ccExtraFood} 食物`, false],
+    ['地图游荡僵尸总数', v => v.zombiesTotal, true],
+    ['巨人 (Giant) / 突变体 (Mutant)', v => `${v.giants} / ${v.mutants}`, false],
+    ['感染城镇建筑数 (Doom Village)', v => v.doomVillages, true],
+    ['树木资源格 (Tree Cells)', v => v.terrainTreeCells, true],
+    ['金矿格 / 石矿格 / 铁矿格', v => `${v.terrainGoldCells} / ${v.terrainStoneCells} / ${v.terrainIronCells}`, false],
+    ['油井 (Oil) / 地图拾取物', v => `${v.oilSources} / ${v.pickables}`, false],
+    ['尸潮事件波数 (LevelEvents)', v => `${v.levelEventsCount} 波`, false]
+  ];
+  return `
+    <table class="metrics">
+      <thead>
+        <tr>
+          <th>实测指标</th>
+          ${sc.variants.map(v => `<th>${MODE_LABELS[v.mode].name}</th>`).join('')}
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(([label, getter, showPct]) => `
+          <tr>
+            <td>${label}</td>
+            ${sc.variants.map((v, idx) => {
+              const raw = getter(v.metrics);
+              const valHtml = typeof raw === 'number' ? fmtNum(raw) : raw;
+              const deltaHtml = (idx > 0 && showPct && typeof raw === 'number') ? pctBadge(raw, getter(base)) : '';
+              return `<td>${valHtml}${deltaHtml}</td>`;
+            }).join('')}
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderMain() {
+  const app = document.getElementById('app');
+  const list = activeScenario === 'all' ? SCENARIOS : SCENARIOS.filter(s => s.id === activeScenario);
+  app.innerHTML = list.map(sc => {
+    const viewHtml = activeView === 'side'
+      ? `<div class="side-grid">
+          ${sc.variants.map(v => {
+            const info = MODE_LABELS[v.mode];
+            const m = v.metrics;
+            return `
+              <div class="pano-box">
+                <div class="pano-bar">
+                  <span>${info.name}</span>
+                  <span class="mode-pill ${info.cls}">${m.survivalNCells} 格 · ${m.rangers}R+${m.soldiers}S</span>
+                </div>
+                <div class="pano-img-wrap" data-zoom="${v.image}" data-caption="${sc.cnTitle} — ${info.name}">
+                  <img src="${v.image}" loading="lazy" alt="${sc.id}_${v.mode}" />
+                  <span class="zoom-hint">点击放大 2048×2048</span>
+                </div>
+                <div class="pano-foot">
+                  <span>尺寸: <strong>${m.playableAreaWidth}×${m.playableAreaWidth}</strong></span>
+                  <span>僵尸: <strong>${fmtNum(m.zombiesTotal)}</strong></span>
+                  <span>村镇建筑: <strong>${m.doomVillages}</strong></span>
+                  <span>巨人/突变: <strong>${m.giants}/${m.mutants}</strong></span>
+                </div>
+              </div>
+            `;
+          }).join('')}
+        </div>`
+      : renderSwipeWidget(sc);
+
+    return `
+      <section class="scenario-card" id="sec_${sc.id}">
+        <div class="sc-head">
+          <div>
+            <h2 class="sc-title">${sc.cnTitle}</h2>
+            <div class="sc-meta">${sc.badge} · 传入种子=${sc.seed} (引擎解析种子=${sc.variants[0].metrics.seed}) · 僵尸倍率=${sc.factorPop}x · 游戏天数=${sc.factorDuration}x</div>
+          </div>
+        </div>
+        <div class="sc-note">${sc.note}</div>
+        ${viewHtml}
+        ${renderMetricsTable(sc)}
+      </section>
+    `;
+  }).join('');
+
+  if (activeView === 'swipe') {
+    list.forEach(sc => {
+      const shell = document.getElementById('swipe_' + sc.id);
+      if (shell) wireSwipe(shell, sc);
+    });
+  }
+
+  document.querySelectorAll('.pano-img-wrap[data-zoom]').forEach(el => {
+    el.addEventListener('click', () => {
+      document.getElementById('lightboxImg').src = el.dataset.zoom;
+      document.getElementById('lightboxCaption').textContent = el.dataset.caption + ' (2048×2048)';
+      document.getElementById('lightbox').classList.add('open');
+    });
+  });
+}
+
+document.querySelectorAll('#viewModes button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#viewModes button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeView = btn.dataset.mode;
+    renderMain();
+  });
+});
+
+const lb = document.getElementById('lightbox');
+document.getElementById('lightboxClose').addEventListener('click', () => lb.classList.remove('open'));
+lb.addEventListener('click', (e) => { if (e.target === lb) lb.classList.remove('open'); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') lb.classList.remove('open'); });
+
+renderTabs();
+renderMain();
+</script>
+</body>
+</html>

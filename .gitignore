@@ -1,0 +1,46 @@
+# Build artifacts & IDE files
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Extracted game binaries (regenerate with scripts/extract_sdk.ps1)
+lib/*.dll
+lib/*.pdb
+lib/*.exe
+lib/*.xml
+lib/*.config
+
+# AI Agent guidelines, skills, MCP configs & downloaded reverse-engineering tools
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+README.agent.md
+.agents/
+.claude/
+.cursor/
+.windsurf/
+.mcp.json
+scripts/.tools/
+
+# Logs
+*.log
+logs/
+
+# Dev & verification outputs
+tabcoop_shots/
+analysis/
+dist/
+*.timeline
+coop_pos_*.txt
+coop_baselinepos_*.txt
+coop_loadpos_*.txt
+coop_trace_*.txt
+coop_replay_result.txt
+coop_cam_*.json
+*.zxsav
+*.zxcheck
+
+# Local notes
+.notes/

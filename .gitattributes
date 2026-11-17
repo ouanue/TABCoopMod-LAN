@@ -1,0 +1,25 @@
+# 统一换行：仓库内一律 LF，避免 Windows 上 checkout 后产生整文件 diff
+* text=auto eol=lf
+
+# PowerShell 在 Windows 上跑，但也接受 LF；保持 LF 与上游一致
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+*.cs    text eol=lf
+*.csproj text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.html  text eol=lf
+*.py    text eol=lf
+*.txt   text eol=lf
+
+# 二进制资源不要做换行转换
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.zip   binary
+*.dll   binary
+*.exe   binary
+*.pdb   binary
