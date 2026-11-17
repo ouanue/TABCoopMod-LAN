@@ -125,6 +125,7 @@ namespace TABCoopMod.UI
         private static DXButton _btnHostCustomMap;
         private static DXButton _btnBalancePreset;
         private static DXButton _btnDisbandRoom;
+        private static DXTextObject _roomCodeText;
         private static DXButton _btnCopyRoomCode;
         private static DXButton _btnClientReady;
         private static DXButton _btnLeaveRoom;
@@ -663,6 +664,11 @@ namespace TABCoopMod.UI
             _roomView.AddObject(_btnBalancePreset);
 
             ry += _btnBalancePreset.Height + gapY;
+            _roomCodeText = CreateTextBox(rightX, ry, rightW, 40f * u, 11f * u, FontStyle.Bold,
+                Color.LightSkyBlue, ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1.5f);
+            _roomView.AddObject(_roomCodeText);
+
+            ry += _roomCodeText.Height + gapY;
             _btnCopyRoomCode = CreateNativeButton("复制房间码", rightX, ry, 30, CopyRoomCodeClicked, smallFont: true);
             _roomView.AddObject(_btnCopyRoomCode);
 
@@ -889,6 +895,7 @@ namespace TABCoopMod.UI
             _btnHostNewSurvival.Visible = isHost;
             _btnHostCustomMap.Visible = isHost;
             _btnBalancePreset.Visible = isHost;
+            _roomCodeText.Visible = isHost;
             _btnCopyRoomCode.Visible = isHost;
             _btnDisbandRoom.Visible = isHost;
 
@@ -919,6 +926,8 @@ namespace TABCoopMod.UI
                 GameBridge.SetZXButtonSteamHue(_btnHostCustomMap, canStart ? -30 : 0);
                 GameBridge.SetZXButtonSteamText(_btnBalancePreset, isBalanced ? "新局预设: 联机均衡" : "新局预设: 原版纯净");
                 GameBridge.SetZXButtonSteamHue(_btnBalancePreset, isBalanced ? -30 : 0);
+
+                SetDynamicText(_roomCodeText, $"房间码: {BuildRoomCode()}", textColor: Color.LightSkyBlue);
             }
             else
             {
