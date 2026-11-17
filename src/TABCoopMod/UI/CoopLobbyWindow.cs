@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 using DXVision;
 using DXVision.GUI;
 using Steamworks;
@@ -106,7 +108,6 @@ namespace TABCoopMod.UI
         private static DXButton _btnCreateSteam;
         private static DXButton _btnCreateLoopback;
         private static DXButton _btnCreateLan;
-        private static DXTextObject _lanAddressText;
         private static DXTextObject _probeCardText;
         private static DXButton _btnJoinLoopback;
         private static DXButton _btnJoinLan;
@@ -124,8 +125,8 @@ namespace TABCoopMod.UI
         private static DXButton _btnHostCustomMap;
         private static DXButton _btnBalancePreset;
         private static DXButton _btnDisbandRoom;
+        private static DXButton _btnCopyRoomCode;
         private static DXButton _btnClientReady;
-        private static DXTextObject _clientHintText;
         private static DXButton _btnLeaveRoom;
 
         // Local loopback network chaos simulator panel (inside Room View)
@@ -499,12 +500,7 @@ namespace TABCoopMod.UI
             });
             _entryView.AddObject(_btnCreateSteam);
 
-            var steamDesc = CreateTextBox(padLeft, 40f * u + _btnCreateSteam.Height + 6f * u, leftW - padLeft * 2f, 44f * u,
-                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            steamDesc.Text = "创建仅 Steam 好友可见的 2~3 人合作大厅，\n进入等候房间后可通过 Shift+Tab 邀请好友。";
-            _entryView.AddObject(steamDesc);
-
-            float secondBtnY = steamDesc.Y + steamDesc.Height + 18f * u;
+            float secondBtnY = 40f * u + _btnCreateSteam.Height + 12f * u;
             _btnCreateLoopback = CreateNativeButton("创建本地测试房间", padLeft, secondBtnY, 0, () =>
             {
                 _entryStatusMessage = string.Empty;
@@ -522,13 +518,8 @@ namespace TABCoopMod.UI
             });
             _entryView.AddObject(_btnCreateLoopback);
 
-            var localDesc = CreateTextBox(padLeft, secondBtnY + _btnCreateLoopback.Height + 6f * u, leftW - padLeft * 2f, 44f * u,
-                10.5f * u, FontStyle.Regular, Color.Silver, ContentAlignment.TopLeft, Color.Transparent, Color.Transparent, 0f);
-            localDesc.Text = "在 127.0.0.1:27099 开放本地房间，\n支持同机双开及延迟/抖动/丢包网络模拟。";
-            _entryView.AddObject(localDesc);
-
             // Third option: native LAN room (accepts connections from other machines).
-            float thirdBtnY = localDesc.Y + localDesc.Height + 18f * u;
+            float thirdBtnY = secondBtnY + _btnCreateLoopback.Height + 12f * u;
             _btnCreateLan = CreateNativeButton("创建局域网房间", padLeft, thirdBtnY, 20, () =>
             {
                 _entryStatusMessage = string.Empty;
@@ -546,12 +537,6 @@ namespace TABCoopMod.UI
                 }
             });
             _entryView.AddObject(_btnCreateLan);
-
-            _lanAddressText = CreateTextBox(padLeft, thirdBtnY + _btnCreateLan.Height + 6f * u, leftW - padLeft * 2f, 48f * u,
-                10.5f * u, FontStyle.Regular, Color.LightSkyBlue, ContentAlignment.TopLeft,
-                PanelBgColor, BorderDimColor, 1f);
-            _lanAddressText.Text = BuildLanAddressHint();
-            _entryView.AddObject(_lanAddressText);
 
             // Right column: Probe & Join
             var rightTitle = CreateTextBox(rightX, 0f, rightW, 28f * u, 13.5f * u, FontStyle.Bold, Color.Gold,
@@ -585,12 +570,6 @@ namespace TABCoopMod.UI
                 RefreshUI();
             }, smallFont: true);
             _entryView.AddObject(_btnRefreshProbe);
-
-            float tipY = refreshBtnY + _btnRefreshProbe.Height + 14f * u;
-            var joinTip = CreateTextBox(rightX, tipY, rightW, 74f * u, 10f * u, FontStyle.Regular, Color.LightSteelBlue,
-                ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1f);
-            joinTip.Text = "  Steam 好友联机：\n  直接接受好友发送的 Steam 邀请，\n  游戏将自动连接并进入等候房间。";
-            _entryView.AddObject(joinTip);
 
             _entryMessageText = CreateTextBox(0f, bodyH - 32f * u, rightX + rightW, 28f * u,
                 10.5f * u, FontStyle.Bold, Color.OrangeRed, ContentAlignment.MiddleLeft, Color.Transparent, Color.Transparent, 0f);
@@ -683,6 +662,10 @@ namespace TABCoopMod.UI
             }, smallFont: true);
             _roomView.AddObject(_btnBalancePreset);
 
+            ry += _btnBalancePreset.Height + gapY;
+            _btnCopyRoomCode = CreateNativeButton("复制房间码", rightX, ry, 30, CopyRoomCodeClicked, smallFont: true);
+            _roomView.AddObject(_btnCopyRoomCode);
+
             float leaveY = bodyH - _btnInviteSteam.Height - 4f * u;
             _btnDisbandRoom = CreateNativeButton("解散房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnDisbandRoom);
@@ -690,11 +673,6 @@ namespace TABCoopMod.UI
             // Client controls share the right column when !IsHost
             _btnClientReady = CreateNativeButton("进入准备状态", rightX, 40f * u, -30, ClientReadyClicked);
             _roomView.AddObject(_btnClientReady);
-
-            float hintY = 40f * u + _btnClientReady.Height + 16f * u;
-            _clientHintText = CreateTextBox(rightX, hintY, rightW, 170f * u, 10.5f * u, FontStyle.Regular, Color.LightGray,
-                ContentAlignment.MiddleLeft, PanelBgColor, BorderDimColor, 1f);
-            _roomView.AddObject(_clientHintText);
 
             _btnLeaveRoom = CreateNativeButton("退出房间", rightX, leaveY, -120, LeaveOrDisbandClicked);
             _roomView.AddObject(_btnLeaveRoom);
@@ -818,7 +796,6 @@ namespace TABCoopMod.UI
             GameBridge.SetZXButtonSteamText(_btnCreateLoopback, "创建本地测试房间");
             GameBridge.SetZXButtonSteamText(_btnCreateLan, "创建局域网房间");
             GameBridge.SetZXButtonSteamText(_btnJoinLan, "加入局域网房间…");
-            SetDynamicText(_lanAddressText, BuildLanAddressHint());
 
             var probe = _lastProbe;
             if (probe != null && probe.IsOnline)
@@ -912,14 +889,13 @@ namespace TABCoopMod.UI
             _btnHostNewSurvival.Visible = isHost;
             _btnHostCustomMap.Visible = isHost;
             _btnBalancePreset.Visible = isHost;
+            _btnCopyRoomCode.Visible = isHost;
             _btnDisbandRoom.Visible = isHost;
 
             _btnClientReady.Visible = !isHost;
-            _clientHintText.Visible = !isHost;
             _btnLeaveRoom.Visible = !isHost;
 
             bool isBalanced = CoopSessionManager.BalancePreset == CoopBalancePreset.Balanced;
-            string presetDesc = CoopBalanceManager.DescribePreset(CoopSessionManager.BalancePreset);
 
             if (isHost)
             {
@@ -953,11 +929,6 @@ namespace TABCoopMod.UI
                 GameBridge.SetZXButtonSteamText(_btnClientReady,
                     !joined ? "正在连接房主..." : (ready ? "取消准备" : "进入准备状态"));
                 GameBridge.SetZXButtonSteamHue(_btnClientReady, ready ? 0 : -30);
-
-                SetDynamicText(_clientHintText, (CoopSessionManager.RoomPhase == LobbyRoomPhase.InGame
-                    ? "  房主当前正在对局中，\n  等待房主返回大厅或同步重连。"
-                    : "  点击上方按钮切换准备状态。\n  全员准备后房主即可选图或读档，\n  加载完毕后将自动同步并开始。")
-                    + $"\n\n  新生存预设: {presetDesc}\n  (读档与自定义地图始终保持原版)");
             }
 
             RefreshLocalChaosPanel(isHost);
@@ -1298,16 +1269,28 @@ namespace TABCoopMod.UI
         {
             _entryStatusMessage = string.Empty;
             string suggested = string.Empty;
-            // Prefill with the best physical adapter's IPv4 subnet (host part stripped) so the
-            // teammate only has to type the last octet. An IPv6 address is never truncated --
-            // half an IPv6 literal is worse than an empty box -- and handing out a Radmin/ZeroTier
-            // prefix as the default was confusing.
-            string local = LocalTcpLoopbackTransport.GetPreferredLanAddress();
-            if (!string.IsNullOrEmpty(local)) suggested = local;
-            if (!string.IsNullOrEmpty(suggested))
+
+            // Prefill priority: clipboard (so a teammate can paste the host's copied room code),
+            // then the best physical adapter's IPv4 subnet (host part stripped) as a fallback.
+            string clip = TryGetClipboardText();
+            if (!string.IsNullOrWhiteSpace(clip))
             {
-                int dot = suggested.LastIndexOf('.');
-                if (dot > 0) suggested = suggested.Substring(0, dot + 1);
+                string c = clip.Trim();
+                if (c.Length >= 7)
+                {
+                    suggested = c;
+                }
+            }
+
+            if (string.IsNullOrEmpty(suggested))
+            {
+                string local = LocalTcpLoopbackTransport.GetPreferredLanAddress();
+                if (!string.IsNullOrEmpty(local))
+                {
+                    suggested = local;
+                    int dot = suggested.LastIndexOf('.');
+                    if (dot > 0) suggested = suggested.Substring(0, dot + 1);
+                }
             }
 
             string hint = BuildJoinDialogHint();
@@ -1529,6 +1512,88 @@ namespace TABCoopMod.UI
             bool curReady = localPeer != null && localPeer.IsReady;
             CoopSessionManager.SetLocalReady(!curReady);
             RefreshUI();
+        }
+
+        /// <summary>
+        /// Host-side "copy room code": puts the most useful reachable endpoint on the clipboard so
+        /// the host can paste it to a teammate. Prefers the physical IPv4 address (the one a
+        /// teammate on the same LAN / Radmin VPN should use); falls back to a global IPv6 address
+        /// (for remote teammates behind CGNAT); never copies a loopback or APIPA address.
+        /// </summary>
+        private static void CopyRoomCodeClicked()
+        {
+            string code = BuildRoomCode();
+            if (string.IsNullOrEmpty(code))
+            {
+                _entryStatusMessage = "未能生成房间码：本机没有可用的局域网 / 公网地址。";
+                RefreshUI();
+                return;
+            }
+
+            bool ok = TrySetClipboardText(code);
+            _entryStatusMessage = ok
+                ? $"已复制房间码: {code}  —  发给队友，让对方在【加入局域网房间…】里一键粘贴。"
+                : $"房间码 {code} 已生成，但复制到剪贴板失败，请手动记录。";
+            RefreshUI();
+        }
+
+        /// <summary>Builds the shareable "room code" string (host:port).</summary>
+        private static string BuildRoomCode()
+        {
+            int port = LocalTcpLoopbackTransport.DefaultPort;
+            // Physical adapter first — that is what a teammate on the same LAN/VPN will reach.
+            string lan = LocalTcpLoopbackTransport.GetPreferredLanAddress();
+            if (!string.IsNullOrEmpty(lan) && !lan.StartsWith("169.254.", StringComparison.Ordinal))
+            {
+                return lan + ":" + port;
+            }
+            string v6 = LocalTcpLoopbackTransport.GetPreferredGlobalIPv6();
+            if (!string.IsNullOrEmpty(v6))
+            {
+                return "[" + v6 + "]:" + port;
+            }
+            return string.Empty;
+        }
+
+        /// <summary>
+        /// Reads clipboard text (used to prefill the join input box). Runs on a fresh STA thread
+        /// because the mod's main render thread is MTA and WinForms Clipboard requires STA.
+        /// </summary>
+        private static string TryGetClipboardText()
+        {
+            string result = string.Empty;
+            Exception err = null;
+            var t = new Thread(() =>
+            {
+                try { result = Clipboard.GetText(); }
+                catch (Exception ex) { err = ex; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join(1500);
+            return err == null ? (result ?? string.Empty) : string.Empty;
+        }
+
+        /// <summary>Writes clipboard text (STA thread). Returns true on success.</summary>
+        private static bool TrySetClipboardText(string text)
+        {
+            bool ok = false;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    Clipboard.SetText(text ?? string.Empty);
+                    ok = true;
+                }
+                catch
+                {
+                    ok = false;
+                }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join(1500);
+            return ok;
         }
 
         private static void LeaveOrDisbandClicked()
