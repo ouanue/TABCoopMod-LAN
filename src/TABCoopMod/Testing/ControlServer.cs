@@ -689,6 +689,8 @@ namespace TABCoopMod.Testing
                 ["chaosJitterMs"] = Sync.CoopSessionManager.LocalChaosJitterMs,
                 ["chaosLossRate"] = Sync.CoopSessionManager.LocalChaosLossRate,
                 ["smoothedRttMs"] = Sync.CoopSessionManager.CurrentSmoothedRttMs,
+                ["lanStatusMessage"] = CoopLobbyWindow.GetStatusMessage(),
+                ["firewallStatus"] = Networking.LocalTcpLoopbackTransport.FirewallStatus,
                 ["peers"] = peers
             };
         }

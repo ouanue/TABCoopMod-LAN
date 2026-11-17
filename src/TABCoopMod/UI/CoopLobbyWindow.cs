@@ -110,6 +110,7 @@ namespace TABCoopMod.UI
         private static DXTextObject _probeCardText;
         private static DXButton _btnJoinLoopback;
         private static DXButton _btnJoinLan;
+        private static DXButton _btnProbeLan;
         private static DXButton _btnRefreshProbe;
         private static DXTextObject _entryMessageText;
 
@@ -144,6 +145,9 @@ namespace TABCoopMod.UI
         /// <summary>Target used by the "join_lan_direct" test action (automated cross-machine verification).</summary>
         public static string TestLanTarget { get; set; } = string.Empty;
 
+        /// <summary>Last status line shown under the lobby entry view (diagnostics / test harness).</summary>
+        public static string GetStatusMessage() { return _entryStatusMessage ?? string.Empty; }
+
         /// <summary>Executes an equivalent button action for automated UI verification via ControlServer.</summary>
         public static bool InvokeTestAction(string action)
         {
@@ -167,6 +171,14 @@ namespace TABCoopMod.UI
                     {
                         CoopSessionManager.JoinSessionLan(TestLanTarget.Trim());
                         RefreshUI();
+                        return true;
+                    }
+                    return false;
+                case "probe_lan":
+                    // Test hook: same reachability check as the button, without the input dialog.
+                    if (!string.IsNullOrEmpty(TestLanTarget))
+                    {
+                        ProbeLanHostAsync(TestLanTarget.Trim());
                         return true;
                     }
                     return false;
@@ -524,6 +536,7 @@ namespace TABCoopMod.UI
                 {
                     CoopSessionManager.StartHostSessionLan();
                     RefreshUI();
+                    PromptForFirewallIfNeeded();
                 }
                 catch (Exception ex)
                 {
@@ -558,7 +571,13 @@ namespace TABCoopMod.UI
             _btnJoinLan = CreateNativeButton("加入局域网房间…", rightX, lanBtnY, -10, JoinLanRoomClicked);
             _entryView.AddObject(_btnJoinLan);
 
-            float refreshBtnY = lanBtnY + _btnJoinLan.Height + 10f * u;
+            // Read-only reachability check: lets the player prove, before joining, whether the
+            // host's IP:port is actually reachable from this machine.
+            float probeLanBtnY = lanBtnY + _btnJoinLan.Height + 10f * u;
+            _btnProbeLan = CreateNativeButton("测试局域网房主连通性", rightX, probeLanBtnY, 0, ProbeLanHostClicked, smallFont: true);
+            _entryView.AddObject(_btnProbeLan);
+
+            float refreshBtnY = probeLanBtnY + _btnProbeLan.Height + 10f * u;
             _btnRefreshProbe = CreateNativeButton("刷新本地探测", rightX, refreshBtnY, 0, () =>
             {
                 _entryStatusMessage = string.Empty;
@@ -1209,33 +1228,75 @@ namespace TABCoopMod.UI
         /// <summary>Builds the "share this address" hint shown under the LAN host button.</summary>
         private static string BuildLanAddressHint()
         {
-            var ips = LocalTcpLoopbackTransport.GetLocalIPv4Addresses();
-            string addr = ips.Count > 0 ? ips[0] : "<未检测到局域网 IP>";
-            if (ips.Count > 1)
-                addr += "（其他网卡: " + string.Join(", ", ips.GetRange(1, ips.Count - 1)) + "）";
-            return $"局域网房间监听 0.0.0.0:{LocalTcpLoopbackTransport.DefaultPort}\n" +
-                   $"把本机 IP 告诉队友: {addr}";
+            var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
+            if (infos.Count == 0)
+            {
+                return $"局域网房间监听 0.0.0.0:{LocalTcpLoopbackTransport.DefaultPort}\n" +
+                       "未检测到可用 IP（请先连上 Wi-Fi 或网线）。";
+            }
+
+            // Physical adapters first (GetLocalAddressInfos already sorted), then虚拟网卡, then APIPA.
+            var physical = new List<string>();
+            var virtualOnes = new List<string>();
+            var invalid = new List<string>();
+            foreach (var info in infos)
+            {
+                if (info.Rank == 0) physical.Add(info.Display);
+                else if (info.Rank == 1) virtualOnes.Add(info.Display);
+                else invalid.Add(info.Display);
+            }
+
+            string preferred = infos[0].Address;
+            var sb = new System.Text.StringBuilder();
+            sb.Append("局域网房间监听 0.0.0.0:").Append(LocalTcpLoopbackTransport.DefaultPort).Append('\n');
+            sb.Append("把本机 IP 告诉队友: ").Append(preferred);
+            if (physical.Count > 1)
+            {
+                sb.Append("\n同网卡其他地址: ").Append(string.Join(", ", physical.GetRange(1, physical.Count - 1).ToArray()));
+            }
+            if (virtualOnes.Count > 0)
+            {
+                sb.Append("\n虚拟网卡(VPN): ").Append(string.Join(", ", virtualOnes.ToArray()));
+            }
+            // Tell the host whether Windows Firewall will actually let teammates in: a blocked
+            // inbound port looks exactly like "the host is offline" from the other machine.
+            string fw = LocalTcpLoopbackTransport.FirewallStatus;
+            if (!string.IsNullOrEmpty(fw) && fw != "未检测")
+            {
+                sb.Append("\n防火墙: ").Append(fw);
+                if (fw.IndexOf("未能", StringComparison.Ordinal) >= 0)
+                {
+                    sb.Append("\n管理员命令: ").Append(LocalTcpLoopbackTransport.BuildFirewallCommand(LocalTcpLoopbackTransport.DefaultPort));
+                }
+            }
+            return sb.ToString();
         }
 
         private static void JoinLanRoomClicked()
         {
             _entryStatusMessage = string.Empty;
             string suggested = string.Empty;
-            var localIps = LocalTcpLoopbackTransport.GetLocalIPv4Addresses();
-            if (localIps.Count > 0) suggested = localIps[0];
-            // Prefill with the local subnet (host part stripped) so a teammate only types the last octet.
+            // Prefill with the best physical adapter's subnet (host part stripped) so the teammate
+            // only has to type the last octet. Falls back to a virtual adapter only if no physical
+            // address exists — handing out a Radmin/ZeroTier prefix as the default was confusing.
+            string local = LocalTcpLoopbackTransport.GetPreferredLanAddress();
+            if (!string.IsNullOrEmpty(local)) suggested = local;
             if (!string.IsNullOrEmpty(suggested))
             {
                 int dot = suggested.LastIndexOf('.');
                 if (dot > 0) suggested = suggested.Substring(0, dot + 1);
             }
 
+            string hint = BuildJoinDialogHint();
+
             try
             {
                 GameBridge.ShowInputBoxMessageBox(
                     "加入局域网房间",
                     $"请输入房主的局域网 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）\n" +
-                    "支持 192.168.1.100 或 192.168.1.100:27099 两种写法。",
+                    "支持 192.168.1.100 或 192.168.1.100:27099 两种写法。\n" +
+                    "注意：对方的 169.254.x.x 地址无效，虚拟网卡地址只在双方装了同一 VPN 时可用。" +
+                    (string.IsNullOrEmpty(hint) ? string.Empty : "\n" + hint),
                     suggested,
                     64,
                     text =>
@@ -1247,6 +1308,12 @@ namespace TABCoopMod.UI
                             RefreshUI();
                             return;
                         }
+                        if (target.StartsWith("169.254.", StringComparison.Ordinal))
+                        {
+                            _entryStatusMessage = $"169.254.x.x 是无效地址（网卡没拿到 IP），无法连接。请让对方运行 ipconfig 查看真正的 192.168.x.x 地址。";
+                            RefreshUI();
+                            return;
+                        }
                         try
                         {
                             CoopSessionManager.JoinSessionLan(target);
@@ -1255,7 +1322,7 @@ namespace TABCoopMod.UI
                         catch (Exception ex)
                         {
                             _entryStatusMessage = $"连接局域网房主失败: {ex.Message}";
-                            CoopSessionManager.StopSession();
+                            try { CoopSessionManager.StopSession(); } catch { }
                         }
                         RefreshUI();
                     },
@@ -1268,6 +1335,139 @@ namespace TABCoopMod.UI
                 _entryStatusMessage = $"无法打开 IP 输入框: {ex.Message}";
                 RefreshUI();
             }
+        }
+
+        /// <summary>One-line "my own addresses" summary appended to the join dialog for troubleshooting.</summary>
+        private static string BuildJoinDialogHint()
+        {
+            var infos = LocalTcpLoopbackTransport.GetLocalAddressInfos();
+            if (infos.Count == 0) return string.Empty;
+            var parts = new List<string>();
+            foreach (var info in infos)
+            {
+                if (info.Rank == 0) parts.Add(info.Display);
+            }
+            if (parts.Count == 0) return string.Empty;
+            return "本机局域网地址: " + string.Join(", ", parts.ToArray());
+        }
+
+        /// <summary>
+        /// Offers a UAC elevation prompt when the automatic (unelevated) firewall open failed.
+        /// Windows silently drops inbound TCP without a rule, which is the single most common
+        /// reason a LAN room appears unreachable to the other machine.
+        /// </summary>
+        private static void PromptForFirewallIfNeeded()
+        {
+            int port = LocalTcpLoopbackTransport.DefaultPort;
+            if (LocalTcpLoopbackTransport.FirewallRuleExists(port))
+            {
+                return;
+            }
+
+            try
+            {
+                GameBridge.ShowYesNoMessageBox(
+                    "放行局域网端口",
+                    $"Windows 防火墙默认会拦截外部连接，队友将无法连上你的房间。\n\n" +
+                    $"是否现在放行 TCP {port}？（会弹出管理员授权窗口）\n\n" +
+                    $"如果选择“否”，你需要手动以管理员身份运行：\n" +
+                    LocalTcpLoopbackTransport.BuildFirewallCommand(port),
+                    () =>
+                    {
+                        Task.Run(() =>
+                        {
+                            bool ok = LocalTcpLoopbackTransport.EnsureFirewallOpenElevated(port);
+                            _entryStatusMessage = ok
+                                ? $"已放行 TCP {port}，队友现在可以连接了。"
+                                : $"未能自动放行 TCP {port}。请以管理员身份运行：{LocalTcpLoopbackTransport.BuildFirewallCommand(port)}";
+                            _needsRefresh = true;
+                        });
+                    },
+                    () =>
+                    {
+                        _entryStatusMessage = $"未放行 TCP {port}：队友可能连不上。手动放行命令：{LocalTcpLoopbackTransport.BuildFirewallCommand(port)}";
+                        RefreshUI();
+                    });
+            }
+            catch (Exception ex)
+            {
+                _entryStatusMessage = $"无法弹出放行提示: {ex.Message}。请手动运行：{LocalTcpLoopbackTransport.BuildFirewallCommand(port)}";
+                RefreshUI();
+            }
+        }
+
+        /// <summary>
+        /// Asks for the host address and runs the same LobbyProbe handshake the mod uses, so the
+        /// player gets a definitive "reachable / not reachable" answer without starting a session.
+        /// This is the check that distinguishes a firewall/NAT problem from a wrong IP.
+        /// </summary>
+        private static void ProbeLanHostClicked()
+        {
+            string suggested = string.Empty;
+            string local = LocalTcpLoopbackTransport.GetPreferredLanAddress();
+            if (!string.IsNullOrEmpty(local))
+            {
+                int dot = local.LastIndexOf('.');
+                suggested = dot > 0 ? local.Substring(0, dot + 1) : local;
+            }
+
+            try
+            {
+                GameBridge.ShowInputBoxMessageBox(
+                    "测试局域网房主连通性",
+                    $"请输入房主的局域网 IP（默认端口 {LocalTcpLoopbackTransport.DefaultPort}）。\n" +
+                    "本操作只发送一个探测包，不会加入房间。\n" +
+                    "如果这里显示“无响应”，说明对方的 27099 端口没有放行（防火墙）或 IP 不对。",
+                    suggested,
+                    64,
+                    text =>
+                    {
+                        string target = (text ?? string.Empty).Trim();
+                        if (string.IsNullOrEmpty(target))
+                        {
+                            _entryStatusMessage = "未输入 IP，已取消连通性测试。";
+                            RefreshUI();
+                            return;
+                        }
+                        ProbeLanHostAsync(target);
+                    },
+                    () => { RefreshUI(); },
+                    text => !string.IsNullOrWhiteSpace(text) && text.Trim().Length >= 7,
+                    "AllCharactersExceptNewLines");
+            }
+            catch (Exception ex)
+            {
+                _entryStatusMessage = $"无法打开探测输入框: {ex.Message}";
+                RefreshUI();
+            }
+        }
+
+        private static void ProbeLanHostAsync(string target)
+        {
+            string host = target;
+            int port = LocalTcpLoopbackTransport.DefaultPort;
+            if (target.Contains(":"))
+            {
+                var parts = target.Split(':');
+                host = parts[0];
+                int parsed;
+                if (int.TryParse(parts[1], out parsed) && parsed > 0 && parsed <= 65535) port = parsed;
+            }
+
+            _entryStatusMessage = $"正在探测 {host}:{port} …";
+            RefreshUI();
+
+            Task.Run(() =>
+            {
+                LocalProbeResult result;
+                string failure;
+                bool reachable = LocalTcpLoopbackTransport.ProbeLanHost(host, port, 1200, out result, out failure);
+                var probed = result;
+                _entryStatusMessage = reachable
+                    ? $"✅ {host}:{port} 可达 — 房主: {probed.HostName}，人数 {probed.PlayerCount}/{probed.MaxPlayers}，{DescribePhase((LobbyRoomPhase)probed.RoomPhase)}。现在可以点【加入局域网房间…】。"
+                    : $"❌ {host}:{port} 无响应 — {failure}。请确认房主已点【创建局域网房间】、IP 正确、并且房主的防火墙放行了 TCP {port}。";
+                _needsRefresh = true;
+            });
         }
 
         private static void JoinLocalRoomClicked()

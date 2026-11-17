@@ -213,22 +213,53 @@ public static object ShowInputBoxMessageBox(string title, string message, string
 
 ### 3.4 `UI/CoopLobbyWindow.cs`
 
-三处新增，全部插在既有布局变量（`leftW` / `rightX` / `rightW` / `bodyH` / `u`）的剩余空间里，未改动任何原有控件坐标：
+新增控件全部插在既有布局变量（`leftW` / `rightX` / `rightW` / `bodyH` / `u`）的剩余空间里，未改动任何原有控件坐标：
 
 | 位置 | 控件 | 行为 |
 | --- | --- | --- |
-| 左列 `localDesc` 之后 | `_btnCreateLan`【创建局域网房间】 | `StartHostSessionLan()` |
-| 左列 `_btnCreateLan` 下方 | `_lanAddressText` 蓝色方块 | `BuildLanAddressHint()` 实时显示本机 IP |
+| 左列 `localDesc` 之后 | `_btnCreateLan`【创建局域网房间】 | `StartHostSessionLan()`，成功后 `PromptForFirewallIfNeeded()` |
+| 左列 `_btnCreateLan` 下方 | `_lanAddressText` 蓝色方块 | `BuildLanAddressHint()` 实时显示本机 IP 与防火墙状态 |
 | 右列 `_btnJoinLoopback` 之后 | `_btnJoinLan`【加入局域网房间…】 | `JoinLanRoomClicked()` 弹输入框 |
+| 右列 `_btnJoinLan` 之后 | `_btnProbeLan`【测试局域网房主连通性】 | `ProbeLanHostClicked()` 只发探测包，不进房 |
+
+**地址排序（v2 修复）**。`GetLocalAddressInfos()` 把地址分三档并稳定排序，替代原来"按网卡枚举顺序取第一个"的做法 —— 后者会把 Radmin VPN 的 `26.x.x.x` 排到真实 WLAN 前面，把错误 IP 交给队友：
+
+| Rank | 含义 | 判定 |
+| --- | --- | --- |
+| 0 | 物理网卡 | 名称/描述不含虚拟网卡标记，且不是 `NetworkInterfaceType.Tunnel` |
+| 1 | 虚拟网卡 | 命中 `VirtualAdapterMarkers`（radmin / zerotier / tailscale / wireguard / tap / tun / vmware / hyper-v / 蒲公英 …） |
+| 2 | 无效地址 | `169.254.*` APIPA |
+
+**防火墙自动放行**。Windows 默认丢弃入站 TCP，对客机而言与"房主没开房"完全无法区分。主机点【创建局域网房间】后：
+
+1. 后台 `EnsureFirewallOpen()` 先 `netsh ... show rule`，不存在则 `netsh ... add rule`（非提权，通常失败）；
+2. 失败则弹 `ShowYesNoMessageBox` 询问是否放行，选"是"走 `EnsureFirewallOpenElevated()`：`ProcessStartInfo{ UseShellExecute = true, Verb = "runas" }` 触发 UAC，用户拒绝时捕获 `Win32Exception`（`ERROR_CANCELLED`）并降级为提示手动命令；
+3. `_lanAddressText` 始终显示 `防火墙: ...` 实际状态，失败时附完整 `netsh` 命令。
+
+**连通性探测**。`ProbeLanHost()` 不吞异常，而是把失败原因分类回报（这是 v2 最重要的可诊断性改进）：
+
+| 情况 | 回报 |
+| --- | --- |
+| 空输入 | `未填写 IP 地址` |
+| DNS 失败 | `无法解析主机名: ...` |
+| `169.254.*` | `169.254.x.x 是无效地址（对方网卡没拿到 IP）` |
+| 连接超时 | `连接超时（{n} ms 内没有任何响应），通常是对方防火墙拦掉了 TCP 27099` |
+| `ConnectionRefused` | `连接被拒绝（对方主机在线但 27099 端口没有监听）` |
+| `HostUnreachable` | `网络不可达（该 IP 与本机不在同一网络）` |
+| 连上无回包 | `TCP 已连上，但对方没有回应探测包（端口被别的程序占用）` |
+| 包类型不符 | `对方端口有响应，但不是本 mod 的房主（返回包类型={pktType}）` |
 
 `BuildLanAddressHint()` 输出形如：
 
 ```
 局域网房间监听 0.0.0.0:27099
-把本机 IP 告诉队友: 192.168.1.100（其他网卡: 26.x.x.x）
+把本机 IP 告诉队友: 192.168.1.100
+虚拟网卡(VPN): 虚拟网卡/Radmin VPN (26.178.89.181)
+防火墙: 未能自动放行（需要管理员权限）
+管理员命令: netsh advfirewall firewall add rule name="TABCoopMod LAN 27099" dir=in ...
 ```
 
-`JoinLanRoomClicked()` 预填本机同网段前缀，减少手输：
+`JoinLanRoomClicked()` 预填**物理网卡**同网段前缀（`GetPreferredLanAddress()`，不再取 `localIps[0]`），减少手输：
 
 ```csharp
 GameBridge.ShowInputBoxMessageBox(
@@ -236,6 +267,8 @@ GameBridge.ShowInputBoxMessageBox(
     "请输入房主的局域网 IP（默认端口 27099）\n支持 192.168.1.100 或 192.168.1.100:27099 两种写法。",
     suggested, 64, onOk, onCancel, validator, "AllCharactersExceptNewLines");
 ```
+
+`ConnectToHost` 改为有界连接（`BeginConnect` + `WaitOne(ConnectTimeoutMs)`，5 秒），超时抛带排障提示的 `TimeoutException`，而不是让 UI 无限期挂住。
 
 `BuildIdentityLine` 增加模式显示，玩家能一眼看出当前走哪条链路：
 
@@ -312,12 +345,44 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 | 引擎输入框 | 点【加入局域网房间…】正常弹出，预填网段前缀，可编辑可确认 |
 | 绑定完整性 | `ALL BINDINGS VERIFIED SUCCESSFULLY (0 missing)`，`Classes OK=64, failed-tolerant=0` |
 | 构建 | 0 warning / 0 error |
+| **地址排序**（v2） | 日志 `LAN host ready. Share this address with clients: 192.168.3.10, 26.178.89.181, 169.254.16.41, 169.254.101.12:27099` — 物理 WLAN 排首位，虚拟网卡与 APIPA 在后 |
+| **连通性探测**（v2） | `probe_lan 192.168.3.10:27099` → `✅ 可达 — 房主: HostPlayer，人数 1/3，等候大厅中` |
+| **失败诊断**（v2） | `probe_lan 192.168.1.3:27099` → `❌ 无响应 — 连接超时（1200 ms 内没有任何响应），通常是对方防火墙拦掉了 TCP 27099，或该 IP 不是房主` |
 
 ### 5.2 尚未验证（交由真实双机测试）
 
 1. **跨物理机**。上述握手是同机双进程经真实局域网 IP 完成的（真套接字、真网卡绑定，非回环捷径），协议层面等价，但未经过真实路由/交换/防火墙/ARP。
 2. **"UI 点按钮 → 输 IP → 成功进房"这条完整人工链路**。组件各自已验证（按钮可用、输入框可弹可编辑、`JoinSessionLan` 可由钩子成功连接），但三者串起来一次性走通的记录尚未留痕。
 3. **进游戏后的同步**。只验证到"进大厅"；真实开局、快照分块传输、30Hz 锁步在 LAN 上的表现未测。同步逻辑本身未改动（本次只改连接建立与绑定地址），故预期不劣于回环模式。
+4. **UAC 提权路径**。`EnsureFirewallOpenElevated()` 的 UAC 弹窗在自动化环境里无法点按，只验证到非提权路径失败并正确降级为提示手动命令。
+
+---
+
+## 5.5 双机连不上时的排查顺序
+
+局域网模式的"连不上"绝大多数不是 mod 的问题。按下面顺序查，每一步都能得到确定答案：
+
+1. **先弄清谁该当房主**。执行 `tracert -d <对方IP>`：如果第一跳就是自己的网关、第二跳才是对方，说明两台机器中间隔着路由器 NAT —— **只能由外层（离公网更近）那台当房主，内层那台出站连接**。内层当房主时，外层永远连不进来（除非做端口映射）。
+2. **确认 IP 类型**。房主在自己的大厅左栏看到 `把本机 IP 告诉队友: 192.168.x.x` 才是可用地址。`169.254.*` 是网卡没拿到 DHCP，无效；`26.*` / `10.*` 常是 Radmin/ZeroTier 虚拟网卡，只在双方都装了同一 VPN 时才通。
+3. **用【测试局域网房主连通性】**。这一步只发一个探测包，不占端口也不建房。三条典型输出：
+
+   | 输出 | 含义 | 下一步 |
+   | --- | --- | --- |
+   | `✅ ... 可达` | 网络与端口都通 | 直接点【加入局域网房间…】 |
+   | `❌ 连接超时` | 包被丢弃 | 房主放行防火墙（见下）或 IP 填错 |
+   | `❌ 连接被拒绝` | 主机在线但没人监听 | 房主还没点【创建局域网房间】 |
+
+4. **房主放行防火墙**。点【创建局域网房间】后 mod 会自动尝试，失败会弹 UAC 询问。若当时选了"否"，以**管理员**身份运行：
+
+   ```powershell
+   netsh advfirewall firewall add rule name="TABCoopMod LAN 27099" dir=in action=allow protocol=TCP localport=27099
+   ```
+
+   放行后大厅左栏会显示 `防火墙: 已放行`。
+
+5. **`ping` 不通不代表网络不通**。Windows 默认丢弃 ICMP，所以 `ping` 超时完全正常；判断依据永远是 TCP（第 3 步的探测，或 `Test-NetConnection <IP> -Port 27099`）。
+
+6. **实在不在同一网络**就用虚拟局域网兜底：双方装同一个 ZeroTier / Tailscale / Radmin 网络，然后填虚拟网卡地址。此时两端都在同一虚拟的二层网络里，防火墙仍是唯一门槛。
 
 ---
 
@@ -326,6 +391,9 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 - **两台版本必须一致**（都是 `v0.1.5-LAN`）。混装上游客机，握手报版本不匹配。
 - **端口固定 27099**，暂不可配。UI 未暴露端口输入；`StartHostSessionLan(int port)` 已在 API 层留了口子。
 - **无 NAT 穿透**。LAN 模式是裸 TCP 直连，只适用于同一局域网或已组好的虚拟局域网（Radmin / ZeroTier / Tailscale / 蒲公英）。跨公网需要端口转发。
+- **不对称可达**。若两台机器之间隔着一层路由器 NAT（`tracert` 第一跳是网关、第二跳才到对方），只有内层能连外层，外层连不进内层。这是网络拓扑决定的，mod 不做端口映射也不会自动穿透 —— 请让外层那台当房主。详见 §5.5。
+- **无 UPnP 自动映射**。上游 `DirectFastPath` 里的 UPnP/STUN 只服务于 Steam P2P 链路，LAN 模式不复用；实测很多家用网关根本不响应 SSDP。
+- **防火墙规则需要管理员权限**。游戏进程默认非提权，自动放行会失败并降级为 UAC 弹窗或手动命令提示。
 - **无传输加密**。TcpLoopback 上游就没有加密（原设计假定回环或 Steam 隧道），LAN 模式沿用了这一前提。在可信局域网内没有问题，**不要在不可信网络上使用**。
 - **`IsLocalLoopbackSession` 语义收窄**。任何依赖它"判断是否为 TCP 传输"的外部代码需改用 `UnwrapTransport() is LocalTcpLoopbackTransport`。本次已同步检查 `ControlServer`、`TestingLifecyclePatches`、`AllyOverlayRenderer`，无遗漏。
 - **`ActivePathSummary` 在客机侧**取连接时记录的 `_lastRemoteEndpoint`，若房主地址变化需重连才会更新。
