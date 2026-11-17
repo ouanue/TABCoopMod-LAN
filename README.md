@@ -160,3 +160,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package_release.ps1
 | [`docs/07_TESTING_AND_MCP.md`](docs/07_TESTING_AND_MCP.md) | 自动化回放验证、Chaos 故障注入与控制通道 |
 | [`docs/10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md`](docs/10_STEAM_P2P_TEST_ANALYSIS_AND_OPTIMIZATION_PLAN.md) | Steam P2P 链路实测与网络兼容矩阵 |
 | [`docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md`](docs/12_STEAM_P2P_BUGS_AND_FIXES_20261116.md) | Steam P2P 缺陷与修复记录 |
+
+---
+
+## 赞赏支持
+
+如果这个 Mod 给你和朋友带来了快乐，欢迎请作者喝一杯奶茶 ☕
+
+<div align="center">
+
+**千言万语，感谢所有人的热爱与支持！**
+
+![林观月 的微信赞赏码](docs/assets/wechat_reward_qr.jpg)
+
+*微信扫一扫，向 林观月 赞赏*
+
+</div>
