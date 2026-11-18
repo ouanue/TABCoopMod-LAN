@@ -44,3 +44,4 @@ coop_cam_*.json
 
 # Local notes
 .notes/
+*.pre_upstream_fix.bak

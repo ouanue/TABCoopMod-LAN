@@ -563,8 +563,8 @@ public const string AssemblyVersion = "0.1.5.0";   // 故意不变
 ## 6. 已知限制
 
 - **两台版本必须一致**（都是 `v0.1.5-LAN`）。混装上游客机，握手报版本不匹配。
-- **联机失步自愈（v4 修复）**：原 `canOverlapAsync` 异步 tick 让物理在后台 `_TaskLogic` 续体线程并发跑，与主线程渲染并行；每台机器的线程调度差异导致移动僵尸位置**线性漂移**（日志 `[PosDriftStats]` 里 `MaxDelta` 斜线增长），攒到 `MissingOnClient≥10` 触发 `Auto-resync` 快照重建（即用户看到的"每 2 分钟断线重连"）。v4 已把 `canOverlapAsync` 改为**默认关闭**（`TestHarnessConfig.EnableAsyncTick` 默认 false），联机逻辑 tick 同步跑主线程，与单机 replay 确定性路径一致 —— 单机 replay PASS 已证明同步路径零漂移。代价是房主帧率从 ~100fps 降到锁步固有 ~30fps；如需旧行为设 `TABCOOP_ENABLE_ASYNC_TICK=1`。
-- **客机掉帧缓解（v4）**：`InputDelayTicks` 默认值 1→2（多 33ms 缓冲，`MinInputDelayTicks=2`）；客机 catchup 节奏从 `behind≥12→4/≥4→3/else 2` 调平缓为 `behind≥16→3/≥6→2/else 1`，减少网络抖动时的剧烈追赶掉帧。
+- **联机失步自愈（v5，移植上游 v0.1.7）**：根因是 `canOverlapAsync` 异步 tick 让物理在后台 `_TaskLogic` 续体线程并发跑，与主线程渲染并行，两台机器线程调度差异导致移动僵尸位置**线性漂移**（日志 `[PosDriftStats]` 里 `MaxDelta` 斜线增长），攒到 `MissingOnClient≥10` 触发 `Auto-resync` 快照重建（即用户看到的"每 2 分钟断线重连"）。**v5 移植上游 v0.1.7 修复**：保留高帧率异步重叠（房主 ~100fps），但把 tick 末 PostMethods 的**确定性排空**移到 `StateChecksum` 之前，异步 tick 与同步多 tick 追帧在同一 tick 边界结算；新增 `LogicThreadId`/`CaptureLogicThread`/`IsLogicWorkerActive` 精确跟踪逻辑工作线程，隔离 `ZXMapEvent`/`OMessageQueue` 的 `DXGuid.New()` 不串入 synced 计数器。单机 replay PASS（200 tick、17961 实体零漂移）已验证。如需强制同步单线程设 `TABCOOP_DISABLE_ASYNC_TICK=1`。
+- **客机掉帧缓解（v4+v5）**：`InputDelayTicks` 默认值 1→2（多 33ms 缓冲，`MinInputDelayTicks=2`）；客机追帧采用上游混合策略：lag≤3 tick 或单 tick>16ms 时保留 1-tick 异步，否则同步多 tick（`behind≥12→4/≥7→3/else 2`），减少网络抖动时的剧烈追赶掉帧。
 - **IPv4 无法穿透双层 CGNAT**。`Lan` 模式是裸 TCP 直连，不做 NAT 穿透。同一局域网/虚拟局域网用 IPv4 即可；异地联机必须走 IPv6（见 §2.5、§5.5 第 7 步），或双方组虚拟局域网。
 - **IPv6 需要运营商分配公网前缀**。`GetNetIPAddress` 只有 `fe80::` 时说明没有公网 IPv6（部分宽带默认关闭），此时只能靠虚拟局域网。
 - **不对称可达**。若两台机器之间隔着一层路由器 NAT（`tracert` 第一跳是网关、第二跳才到对方），只有内层能连外层，外层连不进内层。这是网络拓扑决定的，mod 不做端口映射也不会自动穿透 —— 请让外层那台当房主。详见 §5.5。

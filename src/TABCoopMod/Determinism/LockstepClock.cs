@@ -65,6 +65,24 @@ namespace TABCoopMod.Determinism
         private static DXRandom _auxGlobalRandom;
         private static DXRandom _renderGlobalRandom;
 
+        /// <summary>Managed thread ID executing DXGame._TaskLogic (captured in OnStartUpdate).</summary>
+        public static volatile int LogicThreadId;
+
+        internal static void CaptureLogicThread()
+        {
+            LogicThreadId = Thread.CurrentThread.ManagedThreadId;
+        }
+
+        internal static bool IsLogicWorkerActive()
+        {
+            if (!LogicTickActive) return false;
+            int lt = LogicThreadId;
+            int cur = Thread.CurrentThread.ManagedThreadId;
+            if (lt != 0) return cur == lt;
+            int main = MainThreadId;
+            return main == 0 || cur != main;
+        }
+
         /// <summary>True while DXGame.UpdatePhysics() is on the stack (physics callbacks run outside LogicTickActive).</summary>
         public static volatile bool InPhysicsContext;
 
@@ -90,9 +108,7 @@ namespace TABCoopMod.Determinism
             get
             {
                 if (InDeterministicContext) return true;
-                int main = MainThreadId;
-                bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
-                return (LogicTickActive && !onMain) || IsPhysicsThreadActive();
+                return IsLogicWorkerActive() || IsPhysicsThreadActive();
             }
         }
 
@@ -268,7 +284,7 @@ namespace TABCoopMod.Determinism
             bool onMain = Thread.CurrentThread.ManagedThreadId == MainThreadId;
             return InDeterministicContext
                 || IsPhysicsThreadActive()
-                || (LogicTickActive && !onMain)
+                || IsLogicWorkerActive()
                 || (LoadingLevel && !onMain);
         }
 
@@ -331,6 +347,7 @@ namespace TABCoopMod.Determinism
             IsDeterministicModeActive = false;
             InDeterministicContext = false;
             LogicTickActive = false;
+            LogicThreadId = 0;
             InPhysicsContext = false;
             PhysicsThreadId = 0;
             InPhysicsStep = false;
@@ -1096,10 +1113,8 @@ namespace TABCoopMod.Determinism
                 return false;
             }
 
-            int main = LockstepClock.MainThreadId;
-            bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
             if (LockstepClock.InDeterministicContext
-                || (LockstepClock.LogicTickActive && !onMain)
+                || LockstepClock.IsLogicWorkerActive()
                 || LockstepClock.IsPhysicsThreadActive())
             {
                 __result = LockstepClock.NextSyncedGuid();
@@ -1140,7 +1155,7 @@ namespace TABCoopMod.Determinism
                 __result = LockstepClock.GetRenderGlobalRandom();
             else if (LockstepClock.IsPhysicsThreadActive())
                 __result = LockstepClock.GetAuxGlobalRandom();
-            else if (LockstepClock.InDeterministicContext || (LockstepClock.LogicTickActive && !onMain)
+            else if (LockstepClock.InDeterministicContext || LockstepClock.IsLogicWorkerActive()
                 || (LockstepClock.LoadingLevel && !onMain))
                 __result = LockstepClock.GetSyncedGlobalRandom();
             else
@@ -1372,19 +1387,22 @@ namespace TABCoopMod.Determinism
                     }
                     else
                     {
-                        // Client fell behind Host by more than InputDelayTicks: run multi-tick catchup so
-                        // sub-30 FPS clients cannot drift seconds behind Host.
                         int behind = readyAhead - Sync.CoopSessionManager.InputDelayTicks;
-                        int catchup = behind >= 16 ? 3 : (behind >= 6 ? 2 : 1);
-                        maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
-                        if (behind >= 3)
+                        // Keep async 1-tick overlap alive whenever lag is mild (<=3t) OR a single tick
+                        // already exceeds 16ms (so a 28ms sync catchup budget would break at ran=1 anyway
+                        // and lose _TaskLogic/RenderFrame parallelism, halving client FPS).
+                        if (behind <= 3 || DiagAvgTickLogicMs > 16.0)
                         {
+                            maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, 1, paceMultiplier: 0.72);
+                            if (maxTicksThisFrame < 1) maxTicksThisFrame = 1;
+                        }
+                        else
+                        {
+                            // Client fell behind by >=4 ticks and ticks are fast enough to batch: sync catchup.
+                            int catchup = behind >= 12 ? 4 : (behind >= 7 ? 3 : 2);
+                            maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
                             maxTicksThisFrame = Math.Max(maxTicksThisFrame, Math.Min(catchup, behind));
                             LockstepClock.ResetHostTickPacing();
-                        }
-                        else if (maxTicksThisFrame < 1)
-                        {
-                            maxTicksThisFrame = 1;
                         }
                     }
                 }
@@ -1403,16 +1421,11 @@ namespace TABCoopMod.Determinism
 
             DiagLastWantedTicks = maxTicksThisFrame;
 
-            // [LAN desync fix] Default the async tick overlap OFF in live co-op. With async overlap,
-            // physics runs on the _TaskLogic continuation thread while RenderFrame/Present runs on
-            // MainThread; per-machine thread scheduling makes moving zombie positions drift linearly
-            // (the ~2-minute Auto-resync / MissingOnClient loop). Single-process replay already forces
-            // this off (DeterministicReplayVerifier.IsRunning), which is why replay PASSes while live
-            // co-op drifts. Running the tick synchronously keeps physics on the main thread and matches
-            // the replay-deterministic path, at the cost of capping the host to ~30fps instead of
-            // ~100fps. Set TABCOOP_ENABLE_ASYNC_TICK=1 to re-enable the old overlap behavior.
+            // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
+            // ONLY when running 1 tick this frame; multi-tick catchup must execute synchronously so
+            // slow late-game clients are not permanently capped to 1 tick per render frame.
             bool canOverlapAsync = inCoop
-                && Testing.TestHarnessConfig.EnableAsyncTick
+                && !Testing.TestHarnessConfig.DisableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05
                 && maxTicksThisFrame == 1;
@@ -1469,27 +1482,6 @@ namespace TABCoopMod.Determinism
 
                 if (_mUpdateGameLogic == null) break;
 
-                // Mirror vanilla 1-tick-per-frame PostMethods boundaries between consecutive ticks
-                // so deferred AddToScene/RemoveFromScene/spawn callbacks never execute at differing
-                // tick boundaries on Host vs Client when catchup runs multiple ticks per frame.
-                if (ticksRan > 0)
-                {
-                    long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                    bool prevRendering = __instance.RenderingFrame;
-                    __instance.RenderingFrame = false;
-                    try
-                    {
-                        __instance.PostMethods_OnFinishFrame?.ExecuteAll();
-                        __instance.PostMethods_OnSafeLogicAndDrawing?.ExecuteAll();
-                        __instance.PostMethods_OnStartFrame?.ExecuteAll();
-                    }
-                    finally
-                    {
-                        __instance.RenderingFrame = prevRendering;
-                    }
-                    DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
-                }
-
                 double tLogicStart = System.Diagnostics.Stopwatch.GetTimestamp() * swFreqMs;
                 _inSingleTickStep = true;
                 try
@@ -1523,8 +1515,29 @@ namespace TABCoopMod.Determinism
                     }
                 }
 
+                // Drain all tick-end PostMethods deterministically BEFORE state hashing so every
+                // deferred AddToScene/RemoveFromScene/build-completion settles at the identical tick boundary
+                // regardless of whether Host/Client ran this tick async-overlapped or multi-tick sync.
                 if (inCoop)
                 {
+                    long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    bool prevRendering = __instance.RenderingFrame;
+                    bool prevDet = LockstepClock.InDeterministicContext;
+                    __instance.RenderingFrame = false;
+                    LockstepClock.InDeterministicContext = false;
+                    try
+                    {
+                        __instance.PostMethods_OnFinishFrame?.ExecuteAll();
+                        __instance.PostMethods_OnSafeLogicAndDrawing?.ExecuteAll();
+                        __instance.PostMethods_OnStartFrame?.ExecuteAll();
+                    }
+                    finally
+                    {
+                        LockstepClock.InDeterministicContext = prevDet;
+                        __instance.RenderingFrame = prevRendering;
+                    }
+                    DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
+
                     long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
                     DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
@@ -1630,6 +1643,7 @@ namespace TABCoopMod.Determinism
                         {
                             LockstepClock.AllowPhysicsThisFrame = false;
                             LockstepClock.LogicTickActive = false;
+                            LockstepClock.LogicThreadId = 0;
                         }
                     }, System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
                     _fTaskLogic.SetValue(__instance, cont);
@@ -1639,6 +1653,7 @@ namespace TABCoopMod.Determinism
 
             _mWaitForGameLogic?.Invoke(__instance, null);
             LockstepClock.LogicTickActive = false;
+            LockstepClock.LogicThreadId = 0;
             LockstepClock.InDeterministicContext = false;
         }
 
@@ -1671,6 +1686,7 @@ namespace TABCoopMod.Determinism
                 _diagAsyncWaitMs = _diagAsyncWaitMs <= 0.0 ? waitMs : _diagAsyncWaitMs * 0.9 + waitMs * 0.1;
 
                 LockstepClock.LogicTickActive = false;
+                LockstepClock.LogicThreadId = 0;
                 LockstepClock.InDeterministicContext = false;
 
                 if (__instance == null || __instance.Disposing || !LockstepClock.IsDeterministicModeActive
@@ -1700,14 +1716,6 @@ namespace TABCoopMod.Determinism
                     CSpritePullIsolationPatch.RunDeterministicPullUpdates(__instance);
                 }
 
-                if (Sync.CoopSessionManager.IsInSyncedLevel)
-                {
-                    long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                    Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
-                    DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
-                }
-                RenderVisualInterpolationPatch.OnLogicTickCompleted(1);
-
                 List<Action> deferred = null;
                 lock (_deferredAsyncLock)
                 {
@@ -1717,24 +1725,40 @@ namespace TABCoopMod.Determinism
                         _deferredAsyncPostMethods.Clear();
                     }
                 }
-                if (deferred != null)
                 {
                     long tDrainStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     bool prevRendering = __instance.RenderingFrame;
+                    bool prevDet = LockstepClock.InDeterministicContext;
                     __instance.RenderingFrame = false;
+                    LockstepClock.InDeterministicContext = false;
                     try
                     {
-                        for (int i = 0; i < deferred.Count; i++)
-                            LockstepClock.RunInDeterministicContext(deferred[i]);
-                        // Flush nested frame post-methods (e.g. DXComponent.set_Entity -> SceneChanged)
-                        // queued by the deferred callbacks above, matching sync DXPostMethodManager.ExecuteAll().
+                        if (deferred != null)
+                        {
+                            for (int i = 0; i < deferred.Count; i++)
+                                LockstepClock.RunInDeterministicContext(deferred[i]);
+                        }
+                        // Flush nested/queued post-methods deterministically BEFORE StateChecksum so
+                        // async ticks settle at the exact same tick boundary as sync catchup ticks.
                         __instance.PostMethods_OnFinishFrame?.ExecuteAll();
                         __instance.PostMethods_OnSafeLogicAndDrawing?.ExecuteAll();
                         __instance.PostMethods_OnStartFrame?.ExecuteAll();
                     }
-                    finally { __instance.RenderingFrame = prevRendering; }
+                    finally
+                    {
+                        LockstepClock.InDeterministicContext = prevDet;
+                        __instance.RenderingFrame = prevRendering;
+                    }
                     DiagTickPostDrainTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tDrainStart;
                 }
+
+                if (Sync.CoopSessionManager.IsInSyncedLevel)
+                {
+                    long tHashStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    Sync.CoopSessionManager.OnSimulationTickCompleted(__instance.IAIterationInt);
+                    DiagTickHashTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tHashStart;
+                }
+                RenderVisualInterpolationPatch.OnLogicTickCompleted(1);
 
                 DiagTickWindowCount++;
                 if (DiagTickWindowCount >= 60)
@@ -1833,6 +1857,8 @@ namespace TABCoopMod.Determinism
             return false;
         }
 
+        private static long _lastSimFrameThrottleTs;
+
         // Remember which thread runs the frame loop; DXRandomCtorPatch uses it to keep the
         // level-loading worker's seed sequence synced while the UI thread stays off that counter.
         // Accumulate wall-clock dtMs FIRST, then flush any completed async tick so OnPhysicsStepCompleted
@@ -1842,6 +1868,22 @@ namespace TABCoopMod.Determinism
         public static void StartFrame_CaptureMainThread()
         {
             if (LockstepClock.MainThreadId == 0) LockstepClock.CaptureMainThread();
+
+            int minFrameMs = Testing.TestHarnessConfig.SimMinFrameMs;
+            if (minFrameMs > 0 && Sync.CoopSessionManager.IsInSyncedLevel && !LockstepClock.LoadingLevel)
+            {
+                double swToMs = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                long nowTs = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (_lastSimFrameThrottleTs > 0)
+                {
+                    double elapsedMs = (nowTs - _lastSimFrameThrottleTs) * swToMs;
+                    int waitMs = (int)(minFrameMs - elapsedMs);
+                    if (waitMs > 0 && waitMs <= 250)
+                        Thread.Sleep(waitMs);
+                }
+                _lastSimFrameThrottleTs = System.Diagnostics.Stopwatch.GetTimestamp();
+            }
+
             RenderVisualInterpolationPatch.UpdateFrameAlpha();
             FlushPendingAsyncTick(DXGame.Current);
         }
@@ -2574,6 +2616,10 @@ namespace TABCoopMod.Determinism
         {
             if (LockstepClock.IsDeterministicModeActive)
             {
+                LockstepClock.CaptureLogicThread();
+                int extraTickMs = Testing.TestHarnessConfig.SimExtraTickMs;
+                if (extraTickMs > 0 && Sync.CoopSessionManager.IsInSyncedLevel && !LockstepClock.LoadingLevel)
+                    Thread.Sleep(Math.Min(extraTickMs, 200));
                 LockstepClock.EnsureBehaviourRandomOnCurrentThread();
                 var game = DXGame.Current;
                 if (game != null)
@@ -3200,6 +3246,25 @@ namespace TABCoopMod.Determinism
             var projLevelLoad = AccessTools.DeclaredMethod(typeof(DXProjectLevel), "OnLoadData");
             if (projLevelLoad != null)
                 yield return projLevelLoad;
+
+            // ZXMapEvent is allocated in #=z5Ns_eH8ENLF7HFU5mg== depending on local CameraArea.Contains(cell),
+            // and calls DXGuid.New() inside its field initializer / OnPoolNew(). Isolate it from the
+            // synced entity ID counter so camera divergence never shifts _syncedEntityIdCounter.
+            var mapEventType = AccessTools.TypeByName("ZX.Systems.ZXMapEvent");
+            if (mapEventType != null)
+            {
+                foreach (var c in AccessTools.GetDeclaredConstructors(mapEventType))
+                    if (c != null) yield return c;
+                var mPoolNew = AccessTools.Method(mapEventType, "OnPoolNew");
+                if (mPoolNew != null) yield return mPoolNew;
+            }
+
+            var msgQueueType = AccessTools.TypeByName("ZX.GUI.OMessageQueue");
+            if (msgQueueType != null)
+            {
+                foreach (var c in AccessTools.GetDeclaredConstructors(msgQueueType))
+                    if (c != null) yield return c;
+            }
         }
 
         [HarmonyPrefix]
@@ -3230,7 +3295,7 @@ namespace TABCoopMod.Determinism
             int main = LockstepClock.MainThreadId;
             bool onMain = main != 0 && Thread.CurrentThread.ManagedThreadId == main;
             bool isSimThread = LockstepClock.InDeterministicContext
-                || (LockstepClock.LogicTickActive && !onMain)
+                || LockstepClock.IsLogicWorkerActive()
                 || LockstepClock.IsPhysicsThreadActive();
             if (!isSimThread)
                 return true;
