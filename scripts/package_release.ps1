@@ -184,6 +184,16 @@ $guideText = @"
   3. 杀毒软件误报：
      - Mod 通过 .NET AppDomainManager 在内存中加载 Harmony 补丁（不会修改
        TheyAreBillions.exe 本体），如被拦截请将游戏目录加入白名单。
+   4. 联机每隔一两分钟就「卡一下 / 断线重连」：
+      - 这是锁步失步后的自动快照重建（日志 Auto-resync / MissingOnClient），
+        不是掉线。本版本已默认把联机逻辑 tick 改为同步单线程（与单机确定性一致），
+        从源头消除移动僵尸位置漂移；代价是房主帧率稳定在锁步固有约 30fps。
+      - 如你更看重房主高帧率、愿意接受偶发快照重建，可给游戏设环境变量
+        TABCOOP_ENABLE_ASYNC_TICK=1 恢复旧的异步重叠模式。
+   5. 联机时只有十几帧：
+      - 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络好坏无关。
+      - 本版本已把客机输入缓冲 InputDelayTicks 从 1 提到 2、追赶节奏调平缓，
+        减少网络抖动时的剧烈掉帧；若客机仍频繁掉帧，优先排查 Radmin/路由链路抖动。
 "@
 [System.IO.File]::WriteAllText((Join-Path $stageDir "TABCoopMod_使用说明.txt"), $guideText, [System.Text.Encoding]::UTF8)
 

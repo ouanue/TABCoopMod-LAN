@@ -1375,7 +1375,7 @@ namespace TABCoopMod.Determinism
                         // Client fell behind Host by more than InputDelayTicks: run multi-tick catchup so
                         // sub-30 FPS clients cannot drift seconds behind Host.
                         int behind = readyAhead - Sync.CoopSessionManager.InputDelayTicks;
-                        int catchup = behind >= 12 ? 4 : (behind >= 4 ? 3 : 2);
+                        int catchup = behind >= 16 ? 3 : (behind >= 6 ? 2 : 1);
                         maxTicksThisFrame = LockstepClock.ConsumeHostRealTimeTicks(__instance.GameSpeed, catchup);
                         if (behind >= 3)
                         {
@@ -1403,11 +1403,16 @@ namespace TABCoopMod.Determinism
 
             DiagLastWantedTicks = maxTicksThisFrame;
 
-            // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
-            // ONLY when running 1 tick this frame; multi-tick catchup must execute synchronously so
-            // slow late-game clients are not permanently capped to 1 tick per render frame.
+            // [LAN desync fix] Default the async tick overlap OFF in live co-op. With async overlap,
+            // physics runs on the _TaskLogic continuation thread while RenderFrame/Present runs on
+            // MainThread; per-machine thread scheduling makes moving zombie positions drift linearly
+            // (the ~2-minute Auto-resync / MissingOnClient loop). Single-process replay already forces
+            // this off (DeterministicReplayVerifier.IsRunning), which is why replay PASSes while live
+            // co-op drifts. Running the tick synchronously keeps physics on the main thread and matches
+            // the replay-deterministic path, at the cost of capping the host to ~30fps instead of
+            // ~100fps. Set TABCOOP_ENABLE_ASYNC_TICK=1 to re-enable the old overlap behavior.
             bool canOverlapAsync = inCoop
-                && !Testing.TestHarnessConfig.DisableAsyncTick
+                && Testing.TestHarnessConfig.EnableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05
                 && maxTicksThisFrame == 1;

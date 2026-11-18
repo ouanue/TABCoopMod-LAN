@@ -58,6 +58,14 @@ namespace TABCoopMod.Testing
         /// <summary>When true (TABCOOP_DISABLE_ASYNC_TICK=1), forces synchronous single-thread simulation ticks even in co-op.</summary>
         public static bool DisableAsyncTick { get; private set; }
 
+        /// <summary>
+        /// When true (TABCOOP_ENABLE_ASYNC_TICK=1), re-enables the async tick overlap in live co-op.
+        /// Defaults to FALSE: synchronous deterministic ticks keep physics on the main thread, matching
+        /// the single-process replay path and preventing the moving-entity position drift that causes
+        /// the ~2-minute Auto-resync / MissingOnClient loop.
+        /// </summary>
+        public static bool EnableAsyncTick { get; private set; }
+
         /// <summary>Physics step-end quantization grid inverse step (e.g. 256 => 1/256 cell). 0 disables.</summary>
         public static int PhysicsQuantScale { get; private set; } = DefaultPhysicsQuantScale;
 
@@ -95,6 +103,7 @@ namespace TABCoopMod.Testing
             ResyncMode = Env("TABCOOP_RESYNC_MODE") ?? "async_align";
             ResyncCooldownMs = ParseInt(Env("TABCOOP_RESYNC_COOLDOWN_MS"), -1);
             DisableAsyncTick = Env("TABCOOP_DISABLE_ASYNC_TICK") == "1";
+            EnableAsyncTick = Env("TABCOOP_ENABLE_ASYNC_TICK") == "1";
             PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
 
             string logDir = null;

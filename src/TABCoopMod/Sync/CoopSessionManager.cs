@@ -168,9 +168,9 @@ namespace TABCoopMod.Sync
         // and broadcasts a heartbeat for EVERY tick (even empty), so all peers execute the same
         // commands on the same tick regardless of network latency. InputDelayTicks adapts cleanly
         // between 1..4 ticks based on smoothed peer RTT.
-        public const int MinInputDelayTicks = 1;
+        public const int MinInputDelayTicks = 2;
         public const int MaxInputDelayTicks = 4;
-        public static int InputDelayTicks { get; private set; } = 1;
+        public static int InputDelayTicks { get; private set; } = 2;
         public static double CurrentSmoothedRttMs { get; private set; }
         private static readonly SortedDictionary<int, List<NetCommand>> _pendingTurnCommands =
             new SortedDictionary<int, List<NetCommand>>();
