@@ -54,6 +54,9 @@ namespace TABCoopMod.Determinism
             public ulong HardHash;
             public ulong FullHash;
 
+            /// <summary>Diagnostic only (TABCOOP_PROJ_DUMP=1): projectile IDs hashed in this epoch.</summary>
+            public List<ulong> ProjectileIds;
+
             public override string ToString()
             {
                 return $"Tick={SimTick}, Time={GameTimeMs}ms, Res=({Gold}G/{Wood}W/{Stone}S/{Iron}I/{Oil}O), Entities={EntityCount}, " +
@@ -78,6 +81,12 @@ namespace TABCoopMod.Determinism
             public ulong[] EntityBuckets;
             public List<EntityPosSample> DynamicPositions;
 
+            /// <summary>
+            /// Diagnostic only (TABCOOP_PROJ_DUMP=1): the projectile entity IDs hashed during this
+            /// epoch, in encounter order. Null unless a caller asks for it.
+            /// </summary>
+            public List<ulong> ProjectileIds;
+
             public void Reset(bool allocateBuckets, List<EntityPosSample> dynamicOut)
             {
                 EntityCount = 0;
@@ -94,6 +103,9 @@ namespace TABCoopMod.Determinism
                 LifeBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 EntityBuckets = allocateBuckets ? new ulong[BucketCount] : null;
                 DynamicPositions = dynamicOut;
+                ProjectileIds = allocateBuckets && TABCoopMod.Testing.TestHarnessConfig.ProjDump
+                    ? new List<ulong>(64)
+                    : null;
             }
         }
 
@@ -237,6 +249,8 @@ namespace TABCoopMod.Determinism
             {
                 acc.ProjectileCount++;
                 acc.ProjectileChecksum += (long)entity.ID ^ (qx * 92837111L) ^ (qy * 689287499L) ^ (lifeValue * 283923481L);
+                if (acc.ProjectileIds != null)
+                    acc.ProjectileIds.Add(entity.ID);
                 return;
             }
 
@@ -322,6 +336,7 @@ namespace TABCoopMod.Determinism
             digest.PosBuckets = acc.PosBuckets;
             digest.LifeBuckets = acc.LifeBuckets;
             digest.EntityBuckets = acc.EntityBuckets;
+            digest.ProjectileIds = acc.ProjectileIds;
 
             Mix(acc.EntityCount);
             Mix(acc.ProjectileCount);

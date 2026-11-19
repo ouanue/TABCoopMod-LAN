@@ -2160,6 +2160,19 @@ namespace TABCoopMod.Determinism
             if (!LockstepClock.IsDeterministicModeActive
                 || Testing.DeterministicReplayVerifier.IsRunning
                 || LockstepClock.LoadingLevel
+                // NEVER rewrite entity positions while the simulation is running. The visual pass
+                // writes DXEntity._Position (the exact field StateHasher samples as entity.Position)
+                // and only restores it in ExitVisualSceneUpdate. If a logic tick interleaves with a
+                // camera-driven UpdateVisibleCells (every 20 logic ticks) or a physics step, the tick
+                // reads interpolated positions and the two peers drift apart by ~1 cell/tick -- which
+                // is exactly what a moving camera on one peer used to cause. Camera position itself
+                // is harmless (static divergence tested clean); only churn during a tick is not.
+                || LockstepClock.LogicTickActive
+                || LockstepClock.InDeterministicContext
+                || LockstepClock.IsPhysicsThreadActive()
+                // Re-entrancy guard: a nested Enter would Clear() the restore list of the outer call
+                // and permanently leave interpolated positions on entities.
+                || _inVisualSceneUpdate
                 || DXGame.IsInDesigner
                 || game == null
                 || game.Disposing
@@ -2171,29 +2184,33 @@ namespace TABCoopMod.Determinism
             EnsureRawPosAccessors();
             if (_fastGetRawPos == null || _fastSetRawPos == null) return;
 
-            _inVisualSceneUpdate = true;
-            _hasSavedVisualGameTime = false;
-            if (!LockstepClock.PausedBySession && !game.Paused && game.GameSpeed > 0.001 && _visualGameTimeRemainderMs >= 1.0)
-            {
-                _savedAuthGameTime = game.GameTime;
-                _hasSavedVisualGameTime = true;
-                LockstepClock.SetDeterministicGameTime(game, _savedAuthGameTime + _visualGameTimeRemainderMs);
-            }
-
+            // Do all bail-outs BEFORE mutating any state. The previous code set
+            // _inVisualSceneUpdate/_hasSavedVisualGameTime and advanced game.GameTime first, then
+            // returned on alpha < 0 / lock timeout -- leaving the visual flag set, the restore list
+            // unpopulated and the authoritative GameTime permanently shifted.
             float alpha = _frameInterpAlpha;
             if (alpha < 0f) return;
 
             bool physLockTaken = false;
+            Monitor.TryEnter(DXPhysicWorld.Sync, ref physLockTaken);
+            if (!physLockTaken) return;
+
             try
             {
-                // DXPhysicWorld.Clear() / UnloadLevel runs on a background loader thread under
-                // DXPhysicWorld.Sync while Window_Paint can still pump SetCamera fade frames.
-                // Never stall teardown or race against Bodies shrinking mid-iteration.
-                Monitor.TryEnter(DXPhysicWorld.Sync, ref physLockTaken);
-                if (!physLockTaken) return;
-
+                // Read the body list before touching any visual state: returning from here used to
+                // leave _inVisualSceneUpdate set, which (together with the re-entrancy guard) would
+                // disable the visual pass for good.
                 var bodies = DXPhysicWorld.Bodies;
                 if (bodies == null || bodies.Count == 0) return;
+
+                _inVisualSceneUpdate = true;
+                _hasSavedVisualGameTime = false;
+                if (!LockstepClock.PausedBySession && !game.Paused && game.GameSpeed > 0.001 && _visualGameTimeRemainderMs >= 1.0)
+                {
+                    _savedAuthGameTime = game.GameTime;
+                    _hasSavedVisualGameTime = true;
+                    LockstepClock.SetDeterministicGameTime(game, _savedAuthGameTime + _visualGameTimeRemainderMs);
+                }
 
                 _projectedRestoreList.Clear();
                 bool hasSnaps = _hasVisualSnapOffsets;

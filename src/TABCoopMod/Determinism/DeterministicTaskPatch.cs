@@ -8,14 +8,15 @@ namespace TABCoopMod.Determinism
 {
     /// <summary>
     /// Forces the position-affecting DXHelper_Task.For loops inside DXPhysicWorld.UpdateDefaultTime
-    /// to run sequentially while the deterministic sandbox is active. Those two loops apply forces and
+    /// to run sequentially while the deterministic sandbox is active. Those loops apply forces and
     /// read back positions from multiple tasks in scheduler-dependent order — the only simulated state
     /// touched by parallelism once IsIADeterministic + IsMultiplayer are on. Patching
     /// UpdateDefaultTime itself is impossible: MonoMod refuses to rewrite its filtered-catch IL
     /// (HarmonyException), so we neutralize the parallelism at its source.
     ///
-    /// Everything else (DXScene.UpdateObjects culling, texture baking, level-table loading) keeps its
-    /// native parallelism; serializing those made large saves (6666, 33k entities) take minutes.
+    /// Both physics loops are serialized (see DeterministicTaskPatch.Active). Everything else
+    /// (DXScene.UpdateObjects culling, texture baking, level-table loading) keeps its native
+    /// parallelism; serializing those made large saves (6666, 33k entities) take minutes.
     /// </summary>
     /// <summary>
     /// Brackets ZX.GameSystems.ZXMapDrawer.#=zl2XxwLg=(DXLevel) so level/map RNG streams are
@@ -53,12 +54,34 @@ namespace TABCoopMod.Determinism
     [HarmonyPatch]
     public static class DeterministicTaskPatch
     {
-        // Serialize physics position readback (Loop 2: OnNewPositionComputed -> DXWorldGrid.SetNewCellFor)
-        // on the physics thread only (so concurrent render tasks on MainThread are never serialized),
-        // and serialize MapDrawer generation loops. Physics Loop 1 (StartUpdatePhysics) only writes
-        // per-entity Body forces/fields and keeps native DXHelper_Task.For multi-threading across cores.
+        // Serialize every DXHelper_Task.For loop that runs on the physics thread, plus MapDrawer.
+        //
+        // Loop 2 (InPhysicsReadback: OnNewPositionComputed -> DXWorldGrid.SetNewCellFor) was already
+        // serialized. Loop 1 (InPhysicsStep: StartUpdatePhysics) used to keep native multi-threading,
+        // on the assumption that it "only writes per-entity Body forces/fields". That assumption is
+        // wrong: DXHelper_Task.For splits the body range by minIterationsForConcurrency/maxCores, so
+        // the partition — and therefore the order in which shared accumulators, broadphase inserts
+        // and arbiter candidates are touched — depends on core count and on scheduler timing. Two
+        // peers (or even two runs on the same machine) then integrate slightly different rounding
+        // and drift apart. A/A testing on one binary, one save, one seed, with no input at all,
+        // drifted in roughly half of runs until Loop 1 was serialized too.
+        //
+        // Cost: physics step time goes up (measured physFor1 ~9ms/t on a 17k-entity late save), which
+        // is acceptable — correctness first. Only the physics thread is affected, so concurrent
+        // render/culling tasks on MainThread keep their parallelism.
+        //
+        // Logic-tick serialization can be turned off with TABCOOP_SERIALIZE_LOGIC=0 if a player would
+        // rather have the extra FPS than the extra safety; physics serialization is not optional.
         private static bool Active => LockstepClock.IsDeterministicModeActive
             && ((LockstepClock.InPhysicsReadback && LockstepClock.IsPhysicsThreadActive())
+                || LockstepClock.InPhysicsStep && LockstepClock.IsPhysicsThreadActive()
+                // The logic tick itself parallelizes entity work through the same helper. Any
+                // order-sensitive accumulation or shared scratch buffer it touches makes the tick
+                // depend on core count / scheduler timing, which is exactly the residual A/A drift.
+                // Escape hatch: TABCOOP_SERIALIZE_LOGIC=0 restores native logic-tick parallelism
+                // (faster on very large saves, but re-opens the drift window).
+                || (Testing.TestHarnessConfig.SerializeLogic
+                    && (LockstepClock.InDeterministicContext || LockstepClock.IsLogicWorkerActive()))
                 || LockstepClock.InMapDrawer);
 
         [HarmonyPatch]

@@ -67,6 +67,22 @@ namespace TABCoopMod.Testing
         /// <summary>Optional per-tick delay in ms (TABCOOP_SIM_EXTRA_TICK_MS) to simulate slower CPU tick rate in tests.</summary>
         public static int SimExtraTickMs { get; private set; }
 
+        /// <summary>
+        /// When true (TABCOOP_PROJ_DUMP=1), every epoch digest also logs the exact projectile entity-ID
+        /// set it hashed, tagged with the epoch's SimTick. Both peers log at the same tick, so the two
+        /// lines can be diffed directly to see which projectiles exist on one side only.
+        /// </summary>
+        public static bool ProjDump { get; private set; }
+
+        /// <summary>
+        /// When true (default), DXHelper_Task.For loops that run inside a logic tick are executed
+        /// serially so the tick cannot depend on core count / scheduler timing. Set
+        /// TABCOOP_SERIALIZE_LOGIC=0 to restore the engine's native parallelism in the logic tick
+        /// (higher FPS on very large saves, at the cost of occasional position drift).
+        /// Physics loops (start-update and readback) are always serialized regardless of this flag.
+        /// </summary>
+        public static bool SerializeLogic { get; private set; } = true;
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -104,6 +120,8 @@ namespace TABCoopMod.Testing
             PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
             SimMinFrameMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_MIN_FRAME_MS"), 0));
             SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));
+            ProjDump = Env("TABCOOP_PROJ_DUMP") == "1";
+            SerializeLogic = Env("TABCOOP_SERIALIZE_LOGIC") != "0";
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

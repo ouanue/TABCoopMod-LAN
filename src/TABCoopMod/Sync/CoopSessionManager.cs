@@ -2262,6 +2262,24 @@ namespace TABCoopMod.Sync
                 $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
                 $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
 
+            // Diagnostic (TABCOOP_PROJ_DUMP=1): both peers log the exact projectile ID set hashed at
+            // this epoch's SimTick, so a host/client diff names the diverging arrows directly.
+            if (Testing.TestHarnessConfig.ProjDump && digest.ProjectileIds != null)
+            {
+                var ids = new List<ulong>(digest.ProjectileIds);
+                ids.Sort();
+                var sb = new System.Text.StringBuilder(ids.Count * 21 + 64);
+                sb.Append("[ProjDump] Tick=").Append(digest.SimTick).Append(" role=")
+                  .Append(Transport.IsHost ? "host" : "client")
+                  .Append(" count=").Append(ids.Count).Append(" ids=");
+                for (int i = 0; i < ids.Count; i++)
+                {
+                    if (i > 0) sb.Append(',');
+                    sb.Append(ids[i]);
+                }
+                ModLogger.Info(sb.ToString());
+            }
+
             if (Transport.IsHost)
             {
                 _hostTickDigests[digest.SimTick] = new TickDigestRecord { Digest = digest, Summary = digestSummary };

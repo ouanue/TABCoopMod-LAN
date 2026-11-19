@@ -37,16 +37,21 @@
 
 ## 2. 已确认的工程边界与行为特性
 
-1. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
+1. **引擎并行循环是失步的主因（v6 已修）**：
+   - `DXVision.dll` 的 `DXHelper_Task.For` 按 `minIterationsForConcurrency`/`maxCores` 切块后多线程执行循环体，共享累加器、broadphase 插入、arbiter 候选的访问顺序因此取决于核数与线程调度；两台机器（甚至同机两次运行）得到不同的浮点舍入，逐 tick 累积成位置漂移。
+   - 修复方式：Harmony 前缀替换 `DXHelper_Task.For` 的三个重载，在确定性沙箱内退化为串行 `for` 循环；范围覆盖物理 Loop 1（`StartUpdatePhysics`）、Loop 2（`OnNewPositionComputed` 回读）以及逻辑 tick 本身。A/A 对照（同一二进制、同一存档 `PVE2.zxsav`、种子 `20261109`、零输入）此前约一半运行漂移，修复后连续多轮全绿。
+   - 代价：17k 实体后期存档 `physFor1 ≈ 6~9ms/t`，帧率约 12~17fps。`TABCOOP_SERIALIZE_LOGIC=0` 可关掉逻辑 tick 的串行化换帧率（物理串行不可关）。
+   - 诊断开关：`TABCOOP_PROJ_DUMP=1` 按 epoch 输出 `[ProjDump] Tick=… role=… count=… ids=…`，可直接对比两端抛射物集合。
+2. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
    - 在密集重叠僵尸群下，非托管 `DXPhysicsNative.Space_Step` 偶发 `1e-4` 级别速度微差，累积数十帧后可能产生约 `0.002` 格位置偏离（已通过 `PRE/POST DXPhysicWorld.Step` 验证全部托管输入完全一致）。
    - 已启用的 `Auto-resync` 能在检测到 `StateHash` 不一致后约 **3 秒内**自动重建并恢复一致状态继续锁步，且二次读档已无 `CShadow` NRE。
-2. **纯视觉/环境实体不参与对局状态哈希**：
+3. **纯视觉/环境实体不参与对局状态哈希**：
    - 裸 `DXVision.DXEntity`（受击飙血/弹花贴图）与 `Raven`（环境飞鸟）仅作用于视觉表现，在 `StateHasher` 与 `DeterministicReplayVerifier.DumpPositions` 中已明确跳过。
-3. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
+4. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
    - `PrepareForProgrammaticLoad()` 已彻底消除关卡内二次读档 `CShadow` NRE，但 `inproc` 模式下引擎仍存在跨局静态残留实体总数偏差；确定性比对统一以**双进程模式**为准。
-4. **新开局动态随机地图种子（已接入）**：
+5. **新开局动态随机地图种子（已接入）**：
    - `CoopSessionManager.RollNewGameSeed()` 在正式联机会话（非 `TABCOOP_TEST=1`）下会在建房、点选[新建生存游戏]/[自定义地图]及重返大厅时动态滚动 `CurrentSessionSeed`，使联机新开局每次随机换图，并通过快照/`HostSyncBarrier` 将同一种子精确同步给所有客机；自动化回放与固定种子校验（`TestHarnessConfig.Enabled`）仍保留 `SyncSeed = 20261109`。
-5. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
+6. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
    - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。
 

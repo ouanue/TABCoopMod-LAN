@@ -186,14 +186,20 @@ $guideText = @"
        TheyAreBillions.exe 本体），如被拦截请将游戏目录加入白名单。
     4. 联机每隔一两分钟就「卡一下 / 断线重连」：
        - 这是锁步失步后的自动快照重建（日志 Auto-resync / MissingOnClient），
-         不是掉线。本版本已移植上游 v0.1.7 修复：保留高帧率异步重叠（房主每帧
-         只跑 1 tick），但把 tick 末 PostMethods 的确定性排空移到状态哈希之前，
-         异步与同步多 tick 在同一 tick 边界结算，从源头消除移动僵尸位置漂移。
+         不是掉线。根因在引擎 DXVision 的并行循环 DXHelper_Task.For：它按核数
+         把循环体切块多线程跑，共享累加器/物理广相插入的访问顺序随线程调度变化，
+         两台机器浮点舍入不同，逐 tick 累积成位置漂移。
+       - 本版本用 Harmony 把 DXHelper_Task.For 在确定性沙箱内改成串行循环
+         （物理两段循环 + 逻辑 tick 本身），A/A 对照（同二进制、同存档、
+         同种子、零输入）从「约一半运行会漂移」变为连续多轮全绿。
+       - 想要更高帧率可以给游戏设环境变量 TABCOOP_SERIALIZE_LOGIC=0，
+         关掉逻辑 tick 的串行化（物理串行不可关，关掉必然漂移）。
        - 如需强制同步单线程，可给游戏设环境变量 TABCOOP_DISABLE_ASYNC_TICK=1。
     5. 联机时只有十几帧：
        - 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络好坏无关。
-       - 房主在异步重叠下可达 ~100fps（每帧 1 tick）。客机端 InputDelayTicks
-         已从 1 提到 2、追赶节奏调平缓，减少网络抖动时的剧烈掉帧；客机落后多
+       - 串行化并行循环会让物理步进变慢：17k 实体的后期存档实测每帧 55~80ms
+         （约 12~17fps），这是用帧率换确定性。
+       - 客机端 InputDelayTicks 已从 1 提到 2、追赶节奏调平缓；客机落后多
          tick 时会跑 2~4 tick 追帧，帧率降到 10~15fps 属正常追赶，追上后恢复。
 "@
 [System.IO.File]::WriteAllText((Join-Path $stageDir "TABCoopMod_使用说明.txt"), $guideText, [System.Text.Encoding]::UTF8)
