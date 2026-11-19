@@ -128,8 +128,8 @@ Get-NetIPAddress -AddressFamily IPv6 |
 | `ping` 不通但游戏能连 | Windows 默认拦截 ICMP，属正常，以 TCP 探测为准 |
 | 大厅只显示 `fe80::` / `fd::` | 本机无公网 IPv6，异地联机请改用虚拟局域网 |
 | 房间码显示的是内网地址、异地连不上 | 异地联机需先加入同一虚拟局域网（Radmin 等），房间码会变为 `26.x.x.x` |
-| 联机每隔一两分钟就「卡一下 / 断线重连」 | 这是锁步失步后的**自动快照重建**（日志 `Auto-resync / MissingOnClient`），不是掉线。已移植上游 v0.1.7 修复：联机逻辑 tick 保留**异步重叠**（房主高帧率），但把 tick 末 PostMethods 的**确定性排空**移到状态哈希之前，异步与同步多 tick 在同一 tick 边界结算，从源头消除移动僵尸位置漂移。如需强制同步单线程可设环境变量 `TABCOOP_DISABLE_ASYNC_TICK=1` |
-| 联机时只有十几帧 | 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络无关。房主在异步重叠下可达 ~100fps（每帧 1 tick）；客机端 `InputDelayTicks` 已提至 2、追赶节奏调平缓。客机落后多 tick 时会跑 2~4 tick 追帧，帧率降到 10~15fps 属正常追赶，追上后恢复 |
+| 联机每隔一两分钟就「卡一下 / 断线重连」 | 这是锁步失步后的**自动快照重建**（日志 `Auto-resync / MissingOnClient`），不是掉线。**根因已在 v6 修掉**：引擎 `DXVision.dll` 的 `DXHelper_Task.For` 按 `minIterationsForConcurrency` / `maxCores` 把循环体切块后多线程执行，共享累加器、broadphase 插入、arbiter 候选的访问顺序取决于 CPU 核数与线程调度，两台机器的浮点舍入不同，逐 tick 累积成位置漂移。本版在确定性沙箱内把三个 `For` 重载全部改成串行循环，A/A 对照从约 50% 运行漂移变为 18 次连续全绿、逐 epoch 校验零差异。详见 [`docs/13_LAN_MULTIPLAYER.md`](docs/13_LAN_MULTIPLAYER.md) §6 |
+| 联机时只有十几帧 | 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络无关。v6 为了消除失步把引擎并行循环序列化了，代价是 17k 实体后期存档约 12~17fps（`physFor1 ≈ 6~9ms/tick`）。想要更高帧率可设环境变量 `TABCOOP_SERIALIZE_LOGIC=0`，只关掉**逻辑 tick** 的串行化；物理串行不能关，关掉必然漂移 |
 
 ---
 
