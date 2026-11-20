@@ -112,6 +112,52 @@ namespace TABCoopMod.Sync
         public const double AsyncSoftPosAlignCooldownMs = 8000.0;
         public const int EntityPosRealignCooldownTicks = 180;
 
+        // Sub-precision alignment (docs/11). Drift smaller than MinAsyncPosSnapCells is float/physics
+        // integration noise rather than steering divergence: the per-type thresholds in GameBridge
+        // (0.50-1.80 cells) never fire for it, so nothing corrects it and it accumulates unchecked into
+        // CoarseDiff, then MissingOnClient, then a snapshot rebuild every 1-4 minutes. The micro band
+        // snaps exactly to the Host sample (no damping) because one write closes a sub-cell gap; the
+        // visual ripple is absorbed by RenderVisualInterpolationPatch's snap smoothing.
+        public const int MicroAlignCooldownTicks = 24;
+
+        /// <summary>Per-report cap on sub-precision snaps so a huge late-game save cannot stall a frame.</summary>
+        public const int MicroAlignMaxUnitsPerReport = 2048;
+
+        internal static bool MicroAlignEnabled => TestHarnessConfig.PrecisionAlign;
+
+        internal static float MicroAlignFloorCells
+        {
+            get
+            {
+                float configured = TestHarnessConfig.PrecisionAlignCells;
+                if (configured > 0f) return configured;
+                int scale = TestHarnessConfig.PhysicsQuantScale;
+                return scale > 0 ? 2f / scale : 0.0078f;
+            }
+        }
+
+        /// <summary>
+        /// Drops cooldown entries older than the given window so the per-entity tables cannot grow
+        /// without bound on a long session. Cheap: it only runs when the table is large.
+        /// </summary>
+        private static void PruneCorrectionCooldowns(Dictionary<ulong, int> table, int tick, int windowTicks)
+        {
+            if (table.Count <= 512) return;
+            List<ulong> expired = null;
+            foreach (var kv in table)
+            {
+                int age = tick - kv.Value;
+                if (age < 0 || age >= windowTicks)
+                {
+                    if (expired == null) expired = new List<ulong>(table.Count / 4 + 8);
+                    expired.Add(kv.Key);
+                }
+            }
+            if (expired == null) return;
+            for (int i = 0; i < expired.Count; i++)
+                table.Remove(expired[i]);
+        }
+
         // Per-owner differential alignment (docs/11 Section 1)
         public const int OwnershipLeaseTicks = 300;               // 10s max lease
         public const int OwnershipIdleGraceTicks = 90;            // 3s idle grace after last order
@@ -150,6 +196,10 @@ namespace TABCoopMod.Sync
         private static double _lastPosSyncSentTicks = -100000.0;
         private static double _lastFullPosAlignSentTicks = -100000.0;
         private static readonly Dictionary<ulong, int> _lastEntityPosCorrectedTick = new Dictionary<ulong, int>();
+        // Separate cooldown table for the sub-precision band: those snaps are cheap and frequent, so
+        // keeping them out of the normal table is what lets a unit re-drifted past 0.5 cells still be
+        // handled by the normal path instead of inheriting a 3 s lockout it never earned.
+        private static readonly Dictionary<ulong, int> _lastEntityMicroCorrectedTick = new Dictionary<ulong, int>();
         private static bool _desyncDumped;
 
         private static string EffectiveResyncMode =>
@@ -373,6 +423,7 @@ namespace TABCoopMod.Sync
             _lastCheckedSimTick = -1;
             _lastFullPosAlignSentTicks = -100000.0;
             _lastEntityPosCorrectedTick.Clear();
+            _lastEntityMicroCorrectedTick.Clear();
             _consecutiveProjOnlyMismatch = 0;
             _consecutiveHardMismatch = 0;
             _consecutivePosExceeded = 0;
@@ -752,6 +803,7 @@ namespace TABCoopMod.Sync
             _lastPosSyncSentTicks = -100000.0;
             _lastFullPosAlignSentTicks = -100000.0;
             _lastEntityPosCorrectedTick.Clear();
+            _lastEntityMicroCorrectedTick.Clear();
             _pendingHostSnapshotExport = false;
             _pendingClientSnapshotLoadPath = null;
             _pendingBroadcastSavBytes = null;
@@ -3247,50 +3299,70 @@ namespace TABCoopMod.Sync
                 float maxCoord = nCells > 1 ? nCells - 0.5f : 10000f;
 
                 int appliedCount = 0;
+                int microApplied = 0;
                 int protectedSelfOwned = 0;
+                bool microAlign = item.ApplyPosCorrection && MicroAlignEnabled;
+                float microFloor = microAlign ? MicroAlignFloorCells : 0f;
+                int microBudget = MicroAlignMaxUnitsPerReport;
                 if (item.ApplyPosCorrection && item.Deltas != null && game != null)
                 {
-                    if (_lastEntityPosCorrectedTick.Count > 512)
-                    {
-                        var expiredIds = new List<ulong>();
-                        foreach (var kv in _lastEntityPosCorrectedTick)
-                        {
-                            int age = item.Tick - kv.Value;
-                            if (age < 0 || age >= EntityPosRealignCooldownTicks)
-                                expiredIds.Add(kv.Key);
-                        }
-                        for (int k = 0; k < expiredIds.Count; k++)
-                            _lastEntityPosCorrectedTick.Remove(expiredIds[k]);
-                    }
+                    PruneCorrectionCooldowns(_lastEntityPosCorrectedTick, item.Tick, EntityPosRealignCooldownTicks);
+                    PruneCorrectionCooldowns(_lastEntityMicroCorrectedTick, item.Tick, MicroAlignCooldownTicks);
 
                     byte localPid = Transport.LocalPlayerId;
                     for (int i = 0; i < item.Deltas.Count; i++)
                     {
                         var d = item.Deltas[i];
-                        if (_lastEntityPosCorrectedTick.TryGetValue(d.Id, out int prevTick))
-                        {
-                            int elapsedTicks = item.Tick - prevTick;
-                            if (elapsedTicks >= 0 && elapsedTicks < EntityPosRealignCooldownTicks)
-                                continue;
-                        }
-
                         DXEntity e = game.GetEntityByID(d.Id);
                         if (e == null || e.Disposed || e.PhysicalType != DXBodyType.Dynamic) continue;
 
                         float dist = (float)Math.Sqrt(d.Dx * d.Dx + d.Dy * d.Dy);
-                        if (TryGetActiveUnitOwner(e.ID, item.Tick, e, out byte ownerId)
-                            && ownerId == localPid
-                            && dist < SelfOwnedHostOverrideThreshold)
+
+                        // Sub-precision band: drift below the per-type snap threshold (0.50-1.80 cells)
+                        // is never corrected by the normal path, so it accumulates until CoarseDiff and
+                        // then a full snapshot rebuild. These are snapped exactly onto the Host sample
+                        // (no damping) on a short cooldown, because one write closes a sub-cell gap while
+                        // damping would leave a residue that physics diverges again immediately.
+                        bool microBand = microAlign && dist < MinAsyncPosSnapCells && dist >= microFloor;
+
+                        // Hard cap on sub-precision work per report: a late-game save has ~17k dynamic
+                        // bodies, and letting every sub-cell gap rewrite its body in one tick would
+                        // cost more than the divergence it fixes.
+                        if (microBand && microBudget <= 0) continue;
+
+                        int cooldown = microBand ? MicroAlignCooldownTicks : EntityPosRealignCooldownTicks;
+                        var lastCorrections = microBand ? _lastEntityMicroCorrectedTick : _lastEntityPosCorrectedTick;
+                        if (lastCorrections.TryGetValue(d.Id, out int prevTick))
                         {
-                            protectedSelfOwned++;
-                            continue;
+                            int elapsedTicks = item.Tick - prevTick;
+                            if (elapsedTicks >= 0 && elapsedTicks < cooldown) continue;
                         }
 
-                        float minThreshold = GameBridge.GetEntityPositionSnapThreshold(e, out float damping);
-                        if (dist < minThreshold) continue;
+                        bool hasOwner = TryGetActiveUnitOwner(e.ID, item.Tick, e, out byte ownerId);
+                        if (hasOwner && ownerId == localPid)
+                        {
+                            // A unit the local player is steering is always left alone: the Host sample
+                            // is already stale by the RTT and the local input has not reached the Host.
+                            if (microBand || dist < SelfOwnedHostOverrideThreshold)
+                            {
+                                protectedSelfOwned++;
+                                continue;
+                            }
+                        }
 
-                        float applyDx = dist < 2.2f ? d.Dx * damping : d.Dx;
-                        float applyDy = dist < 2.2f ? d.Dy * damping : d.Dy;
+                        float applyDx, applyDy;
+                        if (microBand)
+                        {
+                            applyDx = d.Dx;
+                            applyDy = d.Dy;
+                        }
+                        else
+                        {
+                            float minThreshold = GameBridge.GetEntityPositionSnapThreshold(e, out float damping);
+                            if (dist < minThreshold) continue;
+                            applyDx = dist < 2.2f ? d.Dx * damping : d.Dx;
+                            applyDy = dist < 2.2f ? d.Dy * damping : d.Dy;
+                        }
 
                         float nx = LockstepClock.QuantizeCoord(e.Position.X + applyDx);
                         float ny = LockstepClock.QuantizeCoord(e.Position.Y + applyDy);
@@ -3300,6 +3372,7 @@ namespace TABCoopMod.Sync
                         ny = Math.Max(0.5f, Math.Min(maxCoord, ny));
                         float actualDx = nx - e.Position.X;
                         float actualDy = ny - e.Position.Y;
+                        if (actualDx == 0f && actualDy == 0f) continue;
                         var newPos = new PointF(nx, ny);
                         e.LastPosition = newPos;
                         e.Position = newPos;
@@ -3310,10 +3383,15 @@ namespace TABCoopMod.Sync
                             body.PositionComputed = newPos;
                             body.PhysicPosition = newPos;
                         }
-                        _lastEntityPosCorrectedTick[e.ID] = item.Tick;
+                        lastCorrections[e.ID] = item.Tick;
                         if (dist <= 3.5f)
                             RenderVisualInterpolationPatch.RecordVisualSnapOffset(e.ID, -actualDx, -actualDy);
                         appliedCount++;
+                        if (microBand)
+                        {
+                            microApplied++;
+                            microBudget--;
+                        }
                     }
                 }
 
@@ -3345,7 +3423,7 @@ namespace TABCoopMod.Sync
                 }
 
                 ModLogger.Info(
-                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, selfProt={protectedSelfOwned}) " +
+                    $"[AsyncPosAlign] Tick={item.Tick} Apply={item.ApplyCorrection}(pos={(item.ApplyPosCorrection ? 1 : 0)}:{appliedCount}/{item.ComparedCount}, micro={microApplied}, selfProt={protectedSelfOwned}) " +
                     $"Drifted(>0.001={item.Drifted001}, >0.01={item.Drifted01}, >0.1={item.Drifted1}, >0.5={item.Drifted5}) " +
                     $"MaxDelta={item.MaxDelta:F4} Rms={item.RmsDelta:F4} MaxType={maxType} Exceeded={item.ExceededThreshold} " +
                     $"LifeDiff={item.LifeDiffCount} LifeFix={lifeApplied} Kills={killsApplied} MissingOnHost={item.MissingOnHost} MissingOnClient={item.MissingOnClient}");
@@ -3354,7 +3432,7 @@ namespace TABCoopMod.Sync
                 {
                     w.Write(item.Tick);
                     w.Write(item.ApplyCorrection);
-                    w.Write(appliedCount);
+                    w.Write(appliedCount + microApplied);
                     w.Write(item.ComparedCount);
                     w.Write(item.Drifted001);
                     w.Write(item.Drifted01);
@@ -3637,6 +3715,12 @@ namespace TABCoopMod.Sync
                     ulong hostMaxId = 0;
                     double sumSq = 0.0;
                     List<EntityDeltaFix> deltas = apply ? new List<EntityDeltaFix>(64) : null;
+                    // Sub-precision band: drift below MinAsyncPosSnapCells is never corrected by the
+                    // normal path, so it accumulates into CoarseDiff and then a snapshot rebuild.
+                    // Collected into the same list; the apply side classifies each delta by its own
+                    // measured gap and uses the matching cooldown/threshold.
+                    bool microAlign = apply && flagApplyPos && MicroAlignEnabled;
+                    float microFloor = microAlign ? MicroAlignFloorCells : 0f;
                     List<EntityLifeFix> lifeFixes = effectiveApplyLife ? new List<EntityLifeFix>(64) : null;
                     var hostIds = new HashSet<ulong>();
 
@@ -3681,7 +3765,12 @@ namespace TABCoopMod.Sync
                             maxDeltaId = hs.Id;
                         }
 
-                        if (apply && dist >= MinAsyncPosSnapCells && dist <= MaxAsyncNudgeCells)
+                        // Normal band >= MinAsyncPosSnapCells, plus the sub-precision band below it
+                        // (PrecisionAlign). Both go into one list: the apply side re-measures the gap
+                        // per entity and picks the matching cooldown/threshold from that measurement,
+                        // so a single list keeps the two paths from disagreeing with each other.
+                        if (apply && dist <= MaxAsyncNudgeCells
+                            && (dist >= MinAsyncPosSnapCells || (microAlign && dist >= microFloor)))
                             deltas.Add(new EntityDeltaFix { Id = hs.Id, Dx = dx, Dy = dy });
                     }
 

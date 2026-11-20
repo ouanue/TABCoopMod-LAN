@@ -111,6 +111,21 @@ namespace TABCoopMod.Testing
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
+        /// <summary>
+        /// Sub-precision position alignment (default ON). Drift below the per-type snap thresholds in
+        /// GameBridge.GetEntityPositionSnapThreshold (0.50-1.80 cells) is never corrected by the normal
+        /// path, so it accumulates until CoarseDiff, then MissingOnClient, then a snapshot rebuild.
+        /// Enabling this makes the two peers snap that band exactly (no damping) on a short cooldown.
+        /// Set TABCOOP_PRECISION_ALIGN=0 to restore the pre-6.4 behaviour for A/B diagnosis.
+        /// </summary>
+        public static bool PrecisionAlign { get; private set; } = true;
+
+        /// <summary>
+        /// Explicit lower bound in cells for sub-precision alignment (TABCOOP_PRECISION_ALIGN_CELLS).
+        /// When unset the floor is derived from PhysicsQuantScale as 2/scale (0.0078 cells at 256).
+        /// </summary>
+        public static float PrecisionAlignCells { get; private set; }
+
         public static string OutputDirectory { get; private set; }
 
         public static void Initialize()
@@ -149,6 +164,8 @@ namespace TABCoopMod.Testing
             ProjDump = Env("TABCOOP_PROJ_DUMP") == "1";
             SerializeLogic = Env("TABCOOP_SERIALIZE_LOGIC") != "0";
             TraceFirstTicks = Math.Max(0, Math.Min(2000, ParseInt(Env("TABCOOP_TRACE_FIRST_TICKS"), 0)));
+            PrecisionAlign = Env("TABCOOP_PRECISION_ALIGN") != "0";
+            PrecisionAlignCells = ParseFloat(Env("TABCOOP_PRECISION_ALIGN_CELLS"), 0f);
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }
@@ -175,6 +192,11 @@ namespace TABCoopMod.Testing
         private static int ParseInt(string s, int fallback)
         {
             return int.TryParse(s, out int v) ? v : fallback;
+        }
+
+        private static float ParseFloat(string s, float fallback)
+        {
+            return float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v) ? v : fallback;
         }
     }
 }

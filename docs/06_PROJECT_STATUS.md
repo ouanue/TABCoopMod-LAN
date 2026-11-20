@@ -1,6 +1,7 @@
 # 06 — 当前项目状态、门禁验收报告与下一步计划 (Project Status)
 
 > **最后更新**: 2026-11-17（**发布 `v0.1.5`**：修复客机后期被单 tick 异步上限锁死导致 3–29s 延迟漂移与暂停失效、新增主机对落后客机的实时 tick 反压流控、修复 `DirectFastPath` 包长/窗口/假死回退缺陷，以及 `SteamP2PTransport`/`LocalTcpLoopbackTransport` 玩家槽位回收复用）
+> **最新增量**: 2026-11-21（**`v6.4` 亚格位置微修正通道**：真机日志定位到 `Pos` 从第一个 epoch 起 100% 分歧而 `phys`/`time`/`Life` 全同；`[AsyncPosAlign]` 实际修正率仅 `0.5629%`、`59%` 的漂移落在 `[0.001, 0.5)` 格被死区丢弃。新增 `MicroAlignFloorCells = 2/PhysicsQuantScale`（默认 `0.0078f`）+ `MicroAlignCooldownTicks = 24` + 无阻尼精确吸附 + 分表冷却；开关 `TABCOOP_PRECISION_ALIGN` 默认开启、`=0` 可回到 v6.3 行为做 A/B。**待真机双机验收**）
 > **构建基线**: `v0.1.5` (`0.1.5.0`) `TABCoopMod.csproj` Release 编译 `0 警告 0 错误`；实机注入 `GameBridge 0 missing`，Harmony 补丁 **`Classes OK=64, failed-tolerant=0`**。
 > **历史过程记录**: 早期排查过程与会话 1~6 演进流水已归档至 [`docs/archive/`](archive/SESSION_CHANGELOG_S1_TO_S6.md)。
 
@@ -32,6 +33,7 @@
 | **版本不一致告警与隐形尸潮修复 (`v0.1.3`)** | `logs/*_3.log` 根因排查 + `1_Backup.zxsav` 120t 回放 + `ChaosTransport` 20s 双开 | ① `INetworkTransport` 新增 `OnVersionMismatch` 事件，`SteamP2PTransport`（Lobby 元数据 `tab_coop_ver` + `HandshakeAccept` 附带版本，兼容旧版无版本尾字段）与 `LocalTcpLoopbackTransport` 双端检测并弹窗/红框告警；② `CoopSessionManager.OnPosDriftSyncChunkReceived` 仅在 `cs.IsDynamic` 扫描且当 `missingOnHost > 8 \|\| missingOnClient > 4` 时禁止批量 `Kill`，避免 ID 偏移时误杀客机新生成的尸潮；③ `VerifyTickChecksum` 收紧 `entityTol = Clamp(EntityCount/1000, 12..30)`、`StructuralReloadStreak = 6`，`PosDriftStatsReport` 接入 `missingOnClient >= 10` 连续 4 次（`30s` 结构冷却）触发 `Auto-resync`；`1_Backup` 120t 回放 `identical`，`Chaos-1` 20s 11/11 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 | **市长赠送单位取出与槽位碰撞修复 (`v0.1.4`)** | `1_Backup.zxsav` 120t 回放 + 双开 Loopback 实机验证（`Mayor_002` + `Mayor_006`） | ① `GameBridge.IsBuildOrBonusCommand` 仅将 `ZX.Entities.Structure` 类型的 `EntityBonusCreation` 归为 `PlaceBuilding` 分支，修正赠送单位被误判为 `(0,0)` 放置而遭吞没的缺陷；② `Patch_ZXCommand_Execute` 与 `ResolveReplayCommand` 为 `EntityBonusCreation` 与 `ExtractFromUnitHolderSlot` 携带真实 `NSlot`/`EntityTypeName` 并在 `AvailableCommands` 中按类型+槽位匹配（防耗尽前移误触发），取出单位后立即 `FlushStartFramePostMethods()`；③ `ExecutePlaceBuilding` 为 `IsBonusBuilding` 校验剩余次数并调用 `ConsumeBonusEntityByType` 与清理放置游标；双开实测 Client/Host 取出 `Ranger(2)`（`16->18`、过期点击未误触发前移的 `ShockingTower`）与放置 `ShockingTower`（`0->1`、次数归零）成功，Tick `31904..34200` 全程 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
 | **客机追帧延迟、暂停同步、直连通道与槽位复用修复 (`v0.1.5`)** | `1_Backup.zxsav` 120t 回放 + `verify_lobby_flow.ps1` + `6666.zxsav` `ChaosTransport` 30s 双开 | ① `LockstepClock` 解除追帧时 `canOverlapAsync` 单 tick 硬限制并放宽客机追帧预算至 `28ms`；② `CoopSessionManager` 通过 `RttPong` 捎带客机实时 `SimTick`，主机按落后 tick（`>=16` 减速 `1.35x`、`>=45` 暂停推进，3.5s 失联保护）自动反压并将 `LatencyStats` 接入 `clientLag`/`tickLag`，同步扩大 `_tickPosCache`（32s）与 `_hostTickDigests`（40s），`PauseSyncController` / `HostPauseKeepalive` 增加客机即时横幅反馈；③ `DirectFastPath` 修正 `len < 39` 包头长度、对齐 `BulkWindowChunks=48` 与 64-bit SACK 窗口、增加 3s 数据通道假死自动回退 Steam；④ `SteamP2PTransport` 与 `LocalTcpLoopbackTransport` 按 `2.._maxPlayers` 最小空闲槽位回收复用（杜绝 `P4`/`P5` 隐身）并清理 `OnP2PConnectFail` / `AllyMiniMapOverlayPatch` 残留；实测 `1_Backup` 回放 `120 ticks identical`、`verify_lobby_flow` 9/9 通过、`6666.zxsav` `Chaos-1` 在双开 `15~22 FPS` 下稳定维持 `clientLag=9~10t` / `tickLag=3~5t`，11/11 `StateChecksum MATCH`、`0 ERROR` | ✅ 通过 |
+| **亚格位置漂移微修正 (`v6.4`)** | 真机双机联机日志（host `host_FINAL_2033.log` / client `client_FINAL_2234.log`）+ 本机双进程 A/A（`affinity-ab.ps1` / `align-sweep.ps1`） | ① 真机证据：`[StateChecksum]` 从第一拍起 `Pos` 100% DIFF，而同 tick 的 `phys`（物理步数）、`time`（GameTime）、`Life`/`Aggro`/`Proj`/`Resv`/`entities` 逐字符相同；6 段累计 `[AsyncPosAlign]` 修正率仅 **0.5629%**（`11726/2083107`），`Drifted` 分布显示 **59% 的漂移落在 [0.001, 0.5) 格**、被 `MinAsyncPosSnapCells = 0.50f` 死区整段丢弃；② 落地：新增 `MicroAlignFloorCells`（默认 `2/PhysicsQuantScale = 0.0078f`，与 `QuantizeCoord` 的 `1/256` 量化粒度对齐）、`MicroAlignCooldownTicks = 24`、`MicroAlignMaxUnitsPerReport = 2048`，收集侧单列表按 `dist` 分流、应用侧微漂移带**无阻尼精确吸附**（阻尼只走 `55%~75%`，残差会被下一步物理重新放大），微修正与常规修正**分表冷却**（否则被微修过的单位漂到 `>=0.5` 格时会被 `180 tick` 冷却挡住）；③ 开关 `TABCOOP_PRECISION_ALIGN`（默认开，`=0` 回到 v6.3 行为做 A/B）与 `TABCOOP_PRECISION_ALIGN_CELLS`；④ 本机 A/A 对照（`2` 核 vs `20` 核，`align=0` 3 跑 1 次漂 / `align=1` 3 跑 0 次漂）样本量过小、`epoch` 数不足，**只能作为方向性参考，不作为验收结论** | ⚠️ 待真机验收 |
 
 ---
 
@@ -73,6 +75,15 @@
 10. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
    - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。
+11. **亚格位置漂移的修正死区（v6.4 已加微修正通道，待真机验收）**：
+    - 真机日志证明：`[StateChecksum]` 的 `Pos`（`0.01` 格量化）从**第一个 epoch** 就 100% 不同，而同 tick 的 `phys`（物理步数）、`time`（`GameTime`）、`Life`/`Aggro`/`Proj`/`Prod`/`Resv`/`entities` 全部逐字符相同 ⇒ 不是时钟、不是步数、不是实体集合，纯粹是**同一步内部算出的坐标不同**。本机用 `affinity-ab.ps1` 把两个进程的 `ProcessorAffinity` 倾斜（`2` 核 vs `20` 核）即可稳定复现同型漂移，证明它是**调度敏感的概率性残留**，与 `DeterministicTaskPatch` 头注释“A/A 大约一半的跑次会漂”一致。
+    - 修正通道实效：6 段真实联机累计 `[AsyncPosAlign]` 只应用了 **0.5629%**（`11726/2083107`）；`Drifted` 直方图显示 **59% 的漂移量落在 `[0.001, 0.5)` 格**，被 `MinAsyncPosSnapCells = 0.50f` 整段丢弃，第二层 `GameBridge.GetEntityPositionSnapThreshold` 又给出 `0.50~1.80` 格，两层叠加使得亚格漂移**永远不会被修正**，只能靠 `Auto-resync` 全量重建快照清理。
+    - 修复：`CoopSessionManager` 新增 `MicroAlignFloorCells`（默认 `2 / TABCOOP_PHYSICS_QUANT = 0.0078f`，正好是 `LockstepClock.QuantizeCoord` 的量化步长，再小会被 round 掉）、`MicroAlignCooldownTicks = 24`（微修正便宜且频繁，用短冷却而非 `180`）、`MicroAlignMaxUnitsPerReport = 2048`（单次报告上限，防大局卡帧）。收集侧仍是**单列表**，应用侧按 `dist` 分流；微漂移带走**无阻尼精确吸附**（`applyDx = d.Dx`），因为 `dx = hs.X - cs.X` 已是同 tick 真实差，阻尼只走 `55%~75%` 会让残差被下一步物理重新放大。微修正与常规修正**分表冷却**，否则被微修过的单位漂到 `>=0.5` 格时会被 `180 tick` 冷却挡住。微漂移带里**本地玩家自持单位一律不动**（Host 样本已滞后一个 RTT）。
+    - 开关：`TABCOOP_PRECISION_ALIGN`（默认开启，`=0` 精确回到 v6.3 行为以便 A/B）与 `TABCOOP_PRECISION_ALIGN_CELLS`（覆盖默认下限）。日志新增 `[AsyncPosAlign] … micro=N` 计数，`PosDriftStatsReport` 回报数也计入微修正。
+    - **验收状态**：本机 A/A（`align-sweep.ps1`，`2` 核 vs `20` 核、`200s`/跑）得到 `align=0` 3 跑中 1 跑漂（6 次 `TRANSIENT`，首漂 tick `44220`）、`align=1` 3 跑 0 漂，**但每跑 `StateChecksum` 只有 `0~11` 个 epoch，样本量远不足以定论**；真机双机验收（两台都设 `TABCOOP_TRACE_FIRST_TICKS=2000`，配 `cmptrace.ps1` 看首个分歧 tick 是否后移/消失）**尚未进行**。
+12. **`entities` 字段在跨机 baseline 比对里天然不可比（已定位，非缺陷）**：
+    - 主机每次加载前走 `GameBridge.PrepareForProgrammaticLoad()`，其中 `if (wasInLevel) game.ClearEntities()` 会清空实体列表；客机加载快照走 `LoadSaveFileAndEnter`（先落盘再加载），**`ClearEntities()` 未被调用** ⇒ 客机 `game.Entities` 保留历史已 `Dispose` 实体（实测 `19522` vs `58882`、`19149` vs `76250`）。
+    - 真正参与哈希与物理的集合两端完全相同：`bodies`/`dynamic`/`physPos`/`computed`/`entityPos` 在 7 段 baseline 里逐字符一致（唯一例外是 @`11055` 段 `bodies 12315 vs 12311`，客机少 `4` 个 body，属老存档读档 + 首次连上的边界情况）。⇒ 比对 `entities` 字段会稳定误报，应排除。
 
 ---
 
@@ -84,3 +95,8 @@
    - 使用双 Steam 账号/双机测试 `CoopLobbyWindow` 的创建房间、好友邀请、快照传输与 Steam P2P 全流程联机（`ChaosTransport` 故障注入与断连回归已在本地双开全通过）。
 3. **P3 — 协同 UX 完善与 Phase 4 预研**：
    - 补全大地图地面队友彩色鼠标光标与建造预览框渲染；细化市长“客机意向高亮 + 房主拍板”交互；视情况启动 Phase 4 独立基地模式。
+4. **P0 — `v6.4` 亚格微修正的真机双机验收（未完成，不可假设通过）**：
+   - 两台机器都用 `TABCOOP_TRACE_FIRST_TICKS=2000` 启动（主机侧用 `C:\soft\DSH-jobs\001\开启逐tick追踪并启动游戏_主机.bat`），联机 3 分钟以上并保持建造/移动/战斗活动。
+   - 用 `C:\soft\DSH-jobs\001\cmptrace.ps1 -HostLog <host> -ClientLog <client>` 配对 `[TickTrace]`，观察首个分歧 `rel` 是否比 v6.3 的 `+150~+524` 明显后移或整体消失；用 `C:\soft\DSH-jobs\001\cmpduallog.ps1` 看 `[BucketDiff]` 条数与 `[StateChecksum]` 的 `SOFT POS DRIFT` 比例。
+   - 对照组：同一对机器上设 `TABCOOP_PRECISION_ALIGN=0` 再跑一轮，两边必须用同一份存档、同一会话设置，否则不具可比性。
+   - 判定门槛：`SOFT POS DRIFT` 比例与 `[AsyncPosAlign]` 的 `MaxDelta` 峰值显著下降、且 `Exceeded=True` 不再出现，才算通过；仅“这次没漂”不算（漂移本身是概率性的）。

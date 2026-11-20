@@ -107,3 +107,26 @@ RenderVisualInterpolationPatch.UpdateFrameAlpha(); // 后把刚刚流逝的上�
     - 轮次 B（`disconnect=45000-47500` 精准命中局内行军阶段 2.5 秒完全断连，RTT `408~538ms`，`cmdMax=2897.8ms`，累计丢包 Host `59`/Client `68`）：断连恢复后无崩溃或卡死，全程 **16/16 `MATCH`**、`0 DRIFT/DESYNC`、`0 ERRORS`、`wait=0.1~0.8ms`。
   - **2026-11-16 撤除预演 + 返回主菜单修复后双开 Chaos 回归（`1_Backup.zxsav` + `ChaosTransport`: `latency=80;jitter=20;loss=0.01;seed=7`）**：Release `0 警告 0 错误`，`GameBridge 0 missing`，Harmony **`Classes OK=61, failed-tolerant=0`**；客机发起 `move_units` → `cancel_current_order` → `move_units`（3 游侠，`cmdN=3, cmdAvg=383.2ms, rtt=252.2ms, delay=4t`）期间 **6/6 `StateChecksum MATCH`**（Tick `31904~32220`）；随后双端依次调用 `return_to_menu` 均稳定回到大厅（`HostAlive=True, ClientAlive=True`，`roomPhase=InLobby`），全程 `0 ERROR / 0 UnhandledException`。
   - **待人工桌面确认项**：`CShadow` / 动画序列帧在高刷显示器下的主观连续度，以及撤除位移预演后无“先往前挪再退回”的起步手感与局内退出回大厅稳定性。
+
+
+---
+
+## 5. 亚格位置漂移的微修正通道（`v6.4`，待真机验收）
+
+### 5.1 为什么既有位置修正几乎不工作
+- 真实双机日志（host `host_FINAL_2033.log` / client `client_FINAL_2234.log`，Build `2026-11-20 18:51:44`）显示：`[StateChecksum]` 的 `Pos`（`0.01` 格量化，`qz = (long)Math.Round(px * 100f)`）**从第一个 epoch 起就 100% 不同**，而同 tick 的 `phys`（`DXPhysicWorld.NUpdates`）、`time`（`GameTimeMs`）、`Life`/`Aggro`/`Proj`/`Prod`/`Resv`/`entities` 全部逐字符相同。⇒ 不是时钟偏、不是步数偏、也不是实体集合偏，纯粹是**同一个物理步内部两端算出的坐标不同**。
+- 该差异属调度敏感的概率性残留：本机双进程 A/A 在**不限核**时从不漂移，但把两个进程的 `ProcessorAffinity` 倾斜（`2` 核 vs `20` 核）或用 `2` 核对 `2` 核后即复现同型漂移（`Pos` 先变、`Coarse` 后变、其余通道全同），与 [`DeterministicTaskPatch.cs`](../src/TABCoopMod/Determinism/DeterministicTaskPatch.cs) 头注释“A/A 大约一半的跑次会漂”一致。
+- 修正通道的实际效率：6 段真实联机累计 `[AsyncPosAlign]` 报 **166** 次，`applied = 11726 / compared = 2083107`，即 **0.5629%**。逐条累加 `Drifted(>0.001, >0.01, >0.1, >0.5)` 得到 `228884 / 210393 / 155419 / 93307` ⇒ **59% 的漂移量落在 `[0.001, 0.5)` 格**，被 `MinAsyncPosSnapCells = 0.50f` 整段丢弃；即便进了列表，应用侧第二层 `GameBridge.GetEntityPositionSnapThreshold` 又要求 `0.50~1.80` 格，仍然过不去。两层叠加使得亚格漂移**永远不会被修正**，只能等 `Auto-resync` 全量重建快照。
+
+### 5.2 实现
+- **下限**：`MicroAlignFloorCells` = `TABCOOP_PRECISION_ALIGN_CELLS`（若设了正值）否则 `2 / TABCOOP_PHYSICS_QUANT`，默认 `2/256 = 0.0078f` 格。选 `2` 倍量化步长而不是 `1` 倍，是因为 `LockstepClock.QuantizeCoord` 用 `Math.Round(..., MidpointRounding.ToEven)` 把坐标吸附到 `1/256` 格点，恰好等于一步长的差值有被就近舍回原位的风险。
+- **冷却**：`MicroAlignCooldownTicks = 24`（约 `0.8s`），远短于常规的 `EntityPosRealignCooldownTicks = 180`（`3s`）——微修正是亚格级、便宜且频繁的，用常规冷却会让它几乎无用。**两张冷却表分开维护**（`_lastEntityPosCorrectedTick` / `_lastEntityMicroCorrectedTick`），否则一个被微修过的单位漂到 `>=0.5` 格时会被 `180 tick` 冷却挡住，等于白拿一个它没挣来的三秒锁死。
+- **无阻尼精确吸附**：微漂移带直接 `applyDx = d.Dx; applyDy = d.Dy`，不乘 `damping`。依据是 `dx = hs.X - cs.X` 本身就是**同一 tick** 的主客机真实差（主客两端各自用 `_tickPosCache.TryGetValue(buf.SimTick, …)` 取同 tick 快照），乘 `0.55~0.75` 只走一多半，留下的残差会被下一步物理重新放大，等于没修。
+- **单列表**：收集侧仍只往 `deltas` 里加一份，应用侧按 `dist` 分流到微漂移带或常规带。两路列表对同一实体可能给出冲突的写入顺序，而应用侧本来就要重新测 `dist`，没有分路的必要。
+- **护栏**：微漂移带里 `TryGetActiveUnitOwner` 命中本地玩家的单位**一律不动**——主机样本已经在网络上滞后一个 RTT，本地输入还没到主机，此时把本地单位拉向旧位置会直接对抗玩家的操作手感。自持单位只在常规带、且 `dist >= SelfOwnedHostOverrideThreshold = 3.5f` 时才允许兜底拉回。
+- **预算**：`MicroAlignMaxUnitsPerReport = 2048`，防止大局（实测 `17272` 个 dynamic body）单次报告把所有实体都刷一遍导致卡帧；超预算的实体留到下一轮。
+- **开关**：`TABCOOP_PRECISION_ALIGN`（默认开启，`=0` 精确回到 v6.3 行为）。日志新增 `[AsyncPosAlign] … micro=N` 计数，`PosDriftStatsReport` 回报的 `applied` 也把微修正计入。
+
+### 5.3 验收状态（未完成，不可假设通过）
+- 本机 A/A 对照（`2` 核 vs `20` 核、每跑 `200s`、`align-sweep.ps1`）：`align=0` 3 跑中 **1** 跑漂移（6 次 `TRANSIENT STATE DRIFT`，首漂 tick `44220`）；`align=1` 3 跑 **0** 漂移。但每跑只有 `0~11` 个 `StateChecksum` epoch，样本量远不足以定论，**只能作为方向性参考**。
+- 真机双机验收尚未进行：需要两台都设 `TABCOOP_TRACE_FIRST_TICKS=2000`，再用 `cmptrace.ps1` 观察首个分歧 `rel` 是否明显后移或整体消失，并用 `TABCOOP_PRECISION_ALIGN=0` 做同存档同会话的对照轮。判定门槛是 `SOFT POS DRIFT` 比例与 `MaxDelta` 峰值显著下降且 `Exceeded=True` 不再出现——仅“这次没漂”不算通过（漂移本身是概率性的）。
