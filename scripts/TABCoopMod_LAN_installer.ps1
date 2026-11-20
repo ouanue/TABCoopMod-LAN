@@ -7,7 +7,10 @@ $Host.UI.RawUI.WindowTitle = 'TABCoopMod 局域网版 一键安装'
 $ExpectedZipSize  = 1079551
 $ExpectedDllSize  = 499712
 $ExpectedDllHash  = 'EC46CD1D753D395A1AC77456C6259D3562F48BE1A0E37384ACAC59A6157C3D9B'
-$ExpectedBuild    = '2026-11-20 14:08:17'
+# 只用于提示，不参与判定。zip 内部时间戳只有 2 秒精度，所以从压缩包解出来的
+# 文件时间是 14:08:16，而在开发机上直接构建的是 14:08:17 —— 两者是同一个构建，
+# 判定一律以 SHA256 为准。
+$ExpectedBuild    = '2026-11-20 14:08:16 或 14:08:17（zip 只有 2 秒精度，两种都对）'
 
 function Say($t, $c = 'Gray') { Write-Host $t -ForegroundColor $c }
 function Ok($t) { Write-Host $t -ForegroundColor Green }
