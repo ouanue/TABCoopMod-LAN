@@ -43,17 +43,28 @@
    - 代价：17k 实体后期存档 `physFor1 ≈ 6~9ms/t`，帧率约 12~17fps。`TABCOOP_SERIALIZE_LOGIC=0` 可关掉逻辑 tick 的串行化换帧率（物理串行不可关）。
    - 诊断开关：`TABCOOP_PROJ_DUMP=1` 按 epoch 输出 `[ProjDump] Tick=… role=… count=… ids=…`，可直接对比两端抛射物集合。
 2. **异步 tick 重叠默认关闭（v6.1）**：`canOverlapAsync` 改为 opt-in（`TABCOOP_ENABLE_ASYNC_TICK=1` 才开）。重叠时逻辑 tick 在 `_TaskLogic` 续体线程上跑引擎 `UpdateGameLogic`，与主线程的渲染/DXScene pass 交错，实体位置被采样的时刻由每台机器的线程调度决定 —— 实时联机里表现为每段开始 60~200 tick 内出现亚像素位置漂移，随后 `MissingOnClient` 攒够就 1~4 分钟重建一次快照。A/A 测试一直靠 harness 设 `TABCOOP_DISABLE_ASYNC_TICK=1` 关着它，所以 18 次连绿并不能证明"开着重叠也是确定的"；发布版此前恰恰跑在默认开启上。同步 tick 与回放路径一致，代价是后期存档吞吐被压在 12~30fps。
-   - 诊断开关：每个 epoch 的摘要末尾带 `phys=<DXPhysicWorld.NUpdates>`，两端同 tick 必须相同；不一致时额外打印 `PHYS-UPDATES-MISMATCH host=… client=… delta=…`。`phys=` **不进** `HardHash`/`FullHash`，也不在 `WriteDigestReport` 的 wire 格式里（只随 `Summary` 字符串走），因此对旧构建对端保持二进制兼容。
-3. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
+   - 诊断开关：每个 epoch 的摘要末尾带 `phys=<DXPhysicWorld.NUpdates>`，两端同 tick 必须相同；不一致时额外打印 `PHYS-UPDATES-MISMATCH host=… client=… delta=…`。`phys=` **不进** `HardHash`/`FullHash`；v6.2 起它随 `StateChecksumReport` 的 wire 末尾追加（append-only，旧构建对端照常解析），MATCH 行不再出现假的 `client=0`。
+3. **物理时钟基线不对称是真实双机失步的根因（v6.2 已修）**：
+   - 引擎 `DXGame.UpdatePhysics` 的追赶循环是 `while (game.GameTime - DXPhysicWorld.LastGameTimeUpdatePhysics >= 83.333…) { LastGameTimeUpdatePhysics += 83.333…; UpdateDefaultTime(); }`，步长是编译期常量，**物理步数只由这两个 double 决定**。
+   - 实测（host pid 29132，Build 2026-11-20 14:08:17，真实双机 Radmin 联机）：逐段统计显示 `dPhys` 在段内恒定、只在 reload 边界 +1（一场联机累积到 18 步）——**client 每 reload 一次就比 host 永久多跑 1 个物理步**。原因是两端各自用本地 `game.GameTime` 落基线（`GameBridge.AlignSimulationClocks`），差 83.33ms；且 `RequestPostLoadCalibration` / `ResetSyncTrackingState` / `OnReturningToMainMenu` 三处把 `LastGameTimeUpdatePhysics` 置 0 后无人重新对齐（上游 v0.1.9 同样如此）。
+   - 后果：物理步数不同 → 同一 tick 的实体位置从**第一个 epoch** 就不同（`Pos=` 校验和 841 对里 100% 不同，`Coarse=` 仅 5.5% 相同）→ 逐 tick 累积 → `MissingOnClient` 攒够触发快照重建。这解释了"每段 60~200 tick 就漂"和"同机 A/A 18 连绿但双机必漂"两个看似矛盾的现象。
+   - 修复：房主在 `SnapshotBegin`（append-only 字段）里下发自己的物理时钟原点，客机原样采用；`ApplyDeterministicLevelBaseline` 优先用共享原点对齐。新增 `GameBridge.AlignSimulationClocksTo(originMs)`、`LockstepClock.SharedClockOriginMs`、`LockstepClock.ApplySharedClockOrigin(originMs)`。
+   - 诊断开关：`[FPFingerprint]`（浮点位模式，两机必须逐字符相同）、`[Baseline]`（基线指纹）、`[BucketDiff]`（首个分歧桶）、`TABCOOP_TRACE_FIRST_TICKS=N`（逐 tick 摘要）。
+4. **移植上游 v0.1.9 的确定性修复（v6.2）**：
+   - 忽略表现层市民 Colonist（`IsColonistType` + `StateHasher` `FlagIgnore` + `Building.SpawnColonists` 视觉隔离）——他们只在基地里随机走动，不参战不挡建造，却被计入状态校验。
+   - `StructureNearEnemiesReplayPatch`：回放建造指令时忽略 `HasNearEnemies`，避免"游荡僵尸距建筑差 0.07 格"导致单边拒建 → 资源分叉 → `econ x3` 重建。
+   - 建造预览供电圈隔离（`Suspend/RestoreLocalBuildCursorEnergyPreview`）——本地预览供电圈会让两端 `CanPlaceAtCell` 结论相反。
+   - 收紧 5 分钟兜底重载判据（上游 `substantiveDiff` 口径），小幅实体数差不再触发全量重建。
+5. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
    - 在密集重叠僵尸群下，非托管 `DXPhysicsNative.Space_Step` 偶发 `1e-4` 级别速度微差，累积数十帧后可能产生约 `0.002` 格位置偏离（已通过 `PRE/POST DXPhysicWorld.Step` 验证全部托管输入完全一致）。
    - 已启用的 `Auto-resync` 能在检测到 `StateHash` 不一致后约 **3 秒内**自动重建并恢复一致状态继续锁步，且二次读档已无 `CShadow` NRE。
-4. **纯视觉/环境实体不参与对局状态哈希**：
+6. **纯视觉/环境实体不参与对局状态哈希**：
    - 裸 `DXVision.DXEntity`（受击飙血/弹花贴图）与 `Raven`（环境飞鸟）仅作用于视觉表现，在 `StateHasher` 与 `DeterministicReplayVerifier.DumpPositions` 中已明确跳过。
-5. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
+7. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
    - `PrepareForProgrammaticLoad()` 已彻底消除关卡内二次读档 `CShadow` NRE，但 `inproc` 模式下引擎仍存在跨局静态残留实体总数偏差；确定性比对统一以**双进程模式**为准。
-6. **新开局动态随机地图种子（已接入）**：
+8. **新开局动态随机地图种子（已接入）**：
    - `CoopSessionManager.RollNewGameSeed()` 在正式联机会话（非 `TABCOOP_TEST=1`）下会在建房、点选[新建生存游戏]/[自定义地图]及重返大厅时动态滚动 `CurrentSessionSeed`，使联机新开局每次随机换图，并通过快照/`HostSyncBarrier` 将同一种子精确同步给所有客机；自动化回放与固定种子校验（`TestHarnessConfig.Enabled`）仍保留 `SyncSeed = 20261109`。
-7. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
+9. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
    - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。
 
