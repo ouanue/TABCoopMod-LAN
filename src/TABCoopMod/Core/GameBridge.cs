@@ -33,6 +33,10 @@ namespace TABCoopMod.Core
         public static Type TypeZXWindowMessage { get; private set; }
         public static Type TypeZXSteamManager { get; private set; }
         public static Type TypeZXSystemAudio { get; private set; }
+        /// <summary>ZX.Entities.Colonist - ambient cosmetic walkers (Worker_A / Worker_B).</summary>
+        public static Type TypeColonist { get; private set; }
+        /// <summary>ZX.Entities.Building - the structures that spawn ambient colonists.</summary>
+        public static Type TypeBuilding { get; private set; }
 
         // Cached Reflection Handles
         private static MethodInfo _mZXGameCurrent;
@@ -61,6 +65,11 @@ namespace TABCoopMod.Core
         private static MethodInfo _methodGetResourcesCost;
         private static Type _typeCreateEntityCommand;
         private static Type _typeStructure;
+        private static FieldInfo _fieldLevelSysBuildAreaCursor;
+        private static Type _typeOCellAreaCursor;
+        private static FieldInfo _fieldCursorLastEnergyCell;
+        private static MethodInfo _methodCursorClearEnergyPreview;
+        private static MethodInfo _methodCursorUpdateVisual;
         private static Type _typeEntityBonusCreation;
         private static Type _typeExtractFromSlot;
         private static PropertyInfo _propBonusCmdNSlot;
@@ -255,6 +264,7 @@ namespace TABCoopMod.Core
                     new[] { typeof(ZXEntity) });
                 _typeCreateEntityCommand = GameAssembly.GetType("ZX.Commands.CreateEntityCommand");
                 _typeStructure = GameAssembly.GetType("ZX.Entities.Structure");
+                TypeStructure = _typeStructure;
                 _typeEntityBonusCreation = GameAssembly.GetType("ZX.Commands.EntityBonusCreation");
                 _typeExtractFromSlot = GameAssembly.GetType("ZX.Commands.ExtractFromUnitHolderSlot");
                 _propBonusCmdNSlot = _typeEntityBonusCreation?.GetProperty("NSlot", BindingFlags.Public | BindingFlags.Instance);
@@ -296,6 +306,18 @@ namespace TABCoopMod.Core
                 _mGetEntityBehaviour = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetBehaviour, Type.EmptyTypes);
                 _mGetEntityMovable = AccessTools.Method(typeof(ZXEntity), ObfuscatedSymbols.Method_ZXEntity_GetMovable, Type.EmptyTypes);
                 _typeZombie = GameAssembly.GetType(ObfuscatedSymbols.Type_Zombie);
+                TypeColonist = GameAssembly.GetType(ObfuscatedSymbols.Type_Colonist);
+                TypeBuilding = GameAssembly.GetType(ObfuscatedSymbols.Type_Building);
+                _fieldLevelSysBuildAreaCursor = TypeZXSystemGameLevel != null
+                    ? AccessTools.Field(TypeZXSystemGameLevel, ObfuscatedSymbols.Field_LevelSys_BuildAreaCursor)
+                    : null;
+                _typeOCellAreaCursor = GameAssembly.GetType(ObfuscatedSymbols.Type_OCellAreaCursor);
+                if (_typeOCellAreaCursor != null)
+                {
+                    _fieldCursorLastEnergyCell = AccessTools.Field(_typeOCellAreaCursor, ObfuscatedSymbols.Field_OCellAreaCursor_LastEnergyCell);
+                    _methodCursorClearEnergyPreview = AccessTools.Method(_typeOCellAreaCursor, ObfuscatedSymbols.Method_OCellAreaCursor_ClearEnergyPreview, Type.EmptyTypes);
+                    _methodCursorUpdateVisual = AccessTools.Method(_typeOCellAreaCursor, ObfuscatedSymbols.Method_OCellAreaCursor_UpdateVisual, Type.EmptyTypes);
+                }
 
                 Check(_mGetEntityCmd, "ZXEntity.GetCommandable");
                 Check(_mGetEntitySel, "ZXEntity.GetSelectable");
@@ -303,6 +325,23 @@ namespace TABCoopMod.Core
                 Check(_mGetEntityBehaviour, "ZXEntity.GetBehaviour");
                 Check(_mGetEntityMovable, "ZXEntity.GetMovable");
                 Check(_typeZombie, "Type ZX.Entities.Zombie");
+                // SOFT checks: Colonist / Building are optional. If a future game build renames them
+                // the mod must still initialize - we simply lose the ambient-colonist isolation.
+                if (TypeColonist == null)
+                    ModLogger.Warn("[GameBridge] OPTIONAL BINDING MISSING: Type ZX.Entities.Colonist (ambient colonist isolation disabled).");
+                else
+                    ModLogger.Info("[GameBridge] Verified: Type ZX.Entities.Colonist");
+                if (TypeBuilding == null)
+                    ModLogger.Warn("[GameBridge] OPTIONAL BINDING MISSING: Type ZX.Entities.Building (colonist spawn isolation disabled).");
+                else
+                    ModLogger.Info("[GameBridge] Verified: Type ZX.Entities.Building");
+                // OPTIONAL: build-cursor energy preview isolation. Without it a locally hovered power
+                // building temporarily adds +1 to the shared grid, so the two peers can disagree on
+                // CanPlaceAtCell and single-sidedly reject an already-committed build.
+                if (_typeOCellAreaCursor == null || _fieldCursorLastEnergyCell == null || _methodCursorClearEnergyPreview == null)
+                    ModLogger.Warn("[GameBridge] OPTIONAL BINDING MISSING: OCellAreaCursor energy preview isolation disabled.");
+                else
+                    ModLogger.Info("[GameBridge] Verified: OCellAreaCursor energy preview isolation");
 
                 _mCurCmd = AccessTools.Method(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_GetCurrentCmd, Type.EmptyTypes);
                 _mCancelCur = AccessTools.Method(typeof(CCommandable), ObfuscatedSymbols.Method_CCommandable_CancelCurrent, Type.EmptyTypes);
@@ -1084,6 +1123,56 @@ namespace TABCoopMod.Core
 
         public static bool IsZombieType(Type type) => type != null && _typeZombie != null && _typeZombie.IsAssignableFrom(type);
 
+        /// <summary>
+        /// Ambient cosmetic colonists (ZX.Entities.Colonist: Worker_A / Worker_B). They have no CLife,
+        /// never fight, never block building placement and produce no resources - they only wander
+        /// between buildings. Hashing them inflates PosDrift/RmsDelta and makes EntityCount wobble.
+        /// </summary>
+        public static bool IsColonistType(Type type) => type != null && TypeColonist != null && TypeColonist.IsAssignableFrom(type);
+
+        /// <summary>Static structures (buildings, walls, ...).</summary>
+        public static bool IsStructureType(Type type) => type != null && _typeStructure != null && _typeStructure.IsAssignableFrom(type);
+
+        /// <summary>ZX.Entities.Structure - static world structures (buildings, walls, ...).</summary>
+        public static Type TypeStructure { get; private set; }
+
+        /// <summary>
+        /// Removes the local player's build-cursor power preview from the SHARED power grid so a
+        /// remote PlaceBuilding command sees the deterministic shared grid rather than whichever
+        /// power building the local player happens to be hovering.
+        /// </summary>
+        public static object SuspendLocalBuildCursorEnergyPreview()
+        {
+            if (_fieldLevelSysBuildAreaCursor == null || _fieldCursorLastEnergyCell == null || _methodCursorClearEnergyPreview == null)
+                return null;
+            try
+            {
+                object levelSys = LevelSystemInstance;
+                if (levelSys == null) return null;
+                object cursor = _fieldLevelSysBuildAreaCursor.GetValue(levelSys);
+                if (cursor == null) return null;
+                if (_fieldCursorLastEnergyCell.GetValue(cursor) == null)
+                    return null;
+                _methodCursorClearEnergyPreview.Invoke(cursor, null);
+                return cursor;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static void RestoreLocalBuildCursorEnergyPreview(object cursor)
+        {
+            if (cursor == null || _methodCursorUpdateVisual == null) return;
+            try
+            {
+                if (cursor is DXObject obj && obj.Scene != null)
+                    _methodCursorUpdateVisual.Invoke(cursor, null);
+            }
+            catch { }
+        }
+
         public static void ExecuteCommandOnEntity(object cmd, object executor, object target)
         {
             if (_fastCmdExec != null)
@@ -1370,6 +1459,31 @@ namespace TABCoopMod.Core
             catch (Exception ex)
             {
                 ModLogger.Warn($"[GameBridge] AlignSimulationClocks failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Re-seats the 30Hz logic clock and the 12Hz physics clock on an EXPLICIT origin instead of
+        /// the local game.GameTime. Both peers must use the same origin, otherwise
+        /// DXGame.UpdatePhysics' catch-up loop runs a different number of Chipmunk steps on each
+        /// machine (measured: one extra step per reload, 18 steps after a session) and their entity
+        /// positions drift apart even though every other state channel still matches.
+        /// </summary>
+        public static void AlignSimulationClocksTo(double originMs)
+        {
+            var game = DXGame.Current;
+            if (game == null) return;
+            try
+            {
+                DXGame.LastGameTimeIAUpdate = originMs;
+                DXPhysicWorld.LastGameTimeUpdatePhysics = originMs;
+                DXPhysicWorld.TimeBodyPosition = originMs;
+                DXPhysicWorld.TimeLastBodyPosition = originMs;
+                ModLogger.Info($"[GameBridge] Simulation clocks aligned to shared origin {originMs:F1}ms.");
+            }
+            catch (Exception ex)
+            {
+                ModLogger.Warn($"[GameBridge] AlignSimulationClocksTo failed: {ex.Message}");
             }
         }
 

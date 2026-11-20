@@ -340,6 +340,79 @@ namespace TABCoopMod.Determinism
             DXGame.Current?.UnloadPhysics();
 
             ModLogger.Info($"[LockstepClock] Deterministic sandbox ENABLED (Seed={initialSeed}, StartEntityId={startingEntityIdCounter}, IsIADeterministic={DXGame.IsIADeterministic}).");
+            LogFloatingPointFingerprint();
+        }
+
+        private static long DoubleBits(double v) => BitConverter.DoubleToInt64Bits(v);
+        private static long SingleBits(float v) => BitConverter.ToInt32(BitConverter.GetBytes(v), 0);
+
+        /// <summary>
+        /// DIAGNOSTIC ONLY. Logs the exact bit patterns that System.Math produces for the
+        /// transcendental functions the simulation depends on (pow/sin/cos/atan2/exp/log).
+        /// Those go through the CRT, whose last-bit results may differ between two CPUs, while
+        /// +,-,*,/ and floor/round are exact. Two peers must print identical values here; a
+        /// mismatch means the desync starts in the math library, not in the lockstep loop.
+        /// </summary>
+        public static void LogFloatingPointFingerprint()
+        {
+            try
+            {
+                double pow05 = Math.Pow(0.5, 1.5);
+                double powTick = Math.Pow(MsPerLogicTick, 1.5);
+                double powPhys = Math.Pow(MsPerPhysicsTick, 1.5);
+                double sin05 = Math.Sin(0.5);
+                double cos05 = Math.Cos(0.5);
+                double atan2 = Math.Atan2(0.5, 3.7);
+                double exp = Math.Exp(0.005);
+                double log = Math.Log(0.5);
+                double sum = 0.0;
+                for (int i = 1; i <= 64; i++) sum += Math.Sin(i * 0.37) * Math.Cos(i * 0.11);
+                ModLogger.Info($"[FPFingerprint] pow05={DoubleBits(pow05):X16} powTick={DoubleBits(powTick):X16} powPhys={DoubleBits(powPhys):X16} sin05={DoubleBits(sin05):X16} cos05={DoubleBits(cos05):X16} atan2={DoubleBits(atan2):X16} exp={DoubleBits(exp):X16} log={DoubleBits(log):X16} sum64={DoubleBits(sum):X16} | cores={Environment.ProcessorCount} os={Environment.OSVersion.Version} clr={Environment.Version}");
+            }
+            catch (Exception ex) { ModLogger.Warn($"[FPFingerprint] failed: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// DIAGNOSTIC ONLY. Logs the physics/logic clock baseline plus a positional fingerprint of
+        /// every dynamic body right after a level load or snapshot reload. If the two peers print
+        /// identical lines, they started the segment from the same state and any later drift was
+        /// produced by the simulation loop. If they differ here, the divergence came from the
+        /// save/load path itself and the loop is innocent.
+        /// </summary>
+        public static void LogBaselineFingerprint(string tag)
+        {
+            try
+            {
+                var game = DXGame.Current;
+                if (game == null) { ModLogger.Info($"[Baseline] {tag}: game=null"); return; }
+                long physBits = 0L, computedBits = 0L, entityBits = 0L;
+                int dynamicBodies = 0;
+                var bodies = DXPhysicWorld.Bodies;
+                int bodyCount = bodies?.Count ?? 0;
+                if (bodies != null)
+                {
+                    for (int i = 0; i < bodies.Count; i++)
+                    {
+                        var body = bodies[i];
+                        if (body == null) continue;
+                        var ent = body.GameEntity;
+                        if (ent == null || ent.Disposed) continue;
+                        if (ent.PhysicalType != DXBodyType.Dynamic) continue;
+                        dynamicBodies++;
+                        var pp = body.PhysicPosition;
+                        var pc = body.PositionComputed;
+                        var ep = ent.Position;
+                        physBits += (SingleBits(pp.X) * 73856093L) ^ (SingleBits(pp.Y) * 19349663L) ^ (long)ent.ID;
+                        computedBits += (SingleBits(pc.X) * 73856093L) ^ (SingleBits(pc.Y) * 19349663L) ^ (long)ent.ID;
+                        entityBits += (SingleBits(ep.X) * 73856093L) ^ (SingleBits(ep.Y) * 19349663L) ^ (long)ent.ID;
+                    }
+                }
+                int entityCount = 0;
+                var ents = game.Entities;
+                if (ents != null) { foreach (var _ in ents) entityCount++; }
+                ModLogger.Info($"[Baseline] {tag}: tick={game.IAIterationInt} GameTime={game.GameTime:F3} LastLogic={DXGame.LastGameTimeIAUpdate:F3} LastPhys={DXPhysicWorld.LastGameTimeUpdatePhysics:F3} NUpdates={DXPhysicWorld.NUpdates} timeBody={DXPhysicWorld.TimeBodyPosition:F3} | entities={entityCount} bodies={bodyCount} dynamic={dynamicBodies} | physPos={physBits:X16} computed={computedBits:X16} entityPos={entityBits:X16}");
+            }
+            catch (Exception ex) { ModLogger.Warn($"[Baseline] {tag}: fingerprint failed: {ex.Message}"); }
         }
 
         public static void DisableDeterministicSandbox()
@@ -686,6 +759,37 @@ namespace TABCoopMod.Determinism
         }
 
         /// <summary>
+        /// The simulation clock origin shared by both peers.
+        ///
+        /// DXGame.UpdatePhysics runs a catch-up loop
+        ///     while (game.GameTime - DXPhysicWorld.LastGameTimeUpdatePhysics >= 83.333...) {
+        ///         LastGameTimeUpdatePhysics += 83.333...; UpdateDefaultTime(); }
+        /// so the number of Chipmunk steps a peer has taken is decided by where its physics clock
+        /// was last re-seated. Re-seating it locally (AlignSimulationClocks uses the LOCAL
+        /// game.GameTime) makes the two peers differ by however much their load paths differed —
+        /// measured as one extra physics step per reload, accumulating to 18 steps over a session.
+        ///
+        /// Instead the Host exports the origin it used and the Client adopts exactly that value,
+        /// so "GameTime - LastGameTimeUpdatePhysics" is identical on both sides and the physics
+        /// step counters can never diverge.
+        /// </summary>
+        public static double SharedClockOriginMs { get; private set; } = double.NaN;
+
+        /// <summary>Re-seats the physics clock on the shared origin so both peers step identically.</summary>
+        public static void ApplySharedClockOrigin(double originMs)
+        {
+            if (double.IsNaN(originMs)) return;
+            SharedClockOriginMs = originMs;
+            try
+            {
+                if (!double.IsNaN(DXGame.LastGameTimeIAUpdate))
+                    DXPhysicWorld.LastGameTimeUpdatePhysics = originMs;
+                ModLogger.Info($"[LockstepClock] Shared clock origin adopted: {originMs:F1}ms.");
+            }
+            catch (Exception ex) { ModLogger.Warn($"[LockstepClock] ApplySharedClockOrigin failed: {ex.Message}"); }
+        }
+
+        /// <summary>
         /// Called before LoadSaveFileAndEnter. The actual calibration is deferred to the level-load
         /// completion postfix, when the async loader has restored every entity and GameTime.
         /// </summary>
@@ -724,11 +828,24 @@ namespace TABCoopMod.Determinism
             ResetBehaviourRandom(seed);
             _lastReanchoredSimTick = -1;
             DXWorldGrid.ResetPathsCached();
-            GameBridge.AlignSimulationClocks();
+            // Re-seat the physics clock on the SHARED origin when we know it (Client side, or after
+            // a Host->Client handshake). Fall back to the local GameTime only when the origin is
+            // unknown — which is the Host's very first load, before it has told anybody anything.
+            double origin = SharedClockOriginMs;
+            if (double.IsNaN(origin))
+            {
+                GameBridge.AlignSimulationClocks();
+            }
+            else
+            {
+                ApplySharedClockOrigin(origin);
+                GameBridge.AlignSimulationClocksTo(origin);
+            }
             // The 6s opening camera pan is wall-clock driven; on two processes it lands on
             // different frames, changing which cells are "watched" (and thus visibility-driven
             // RNG/sprite work). Freeze it to the save's camera for a reproducible world.
             GameBridge.DisableCameraIntroAnimation();
+            LogBaselineFingerprint("baseline-applied");
         }
 
         /// <summary>
@@ -3285,6 +3402,18 @@ namespace TABCoopMod.Determinism
                 foreach (var c in AccessTools.GetDeclaredConstructors(msgQueueType))
                     if (c != null) yield return c;
             }
+
+            // Ambient cosmetic colonists (Worker_A / Worker_B) spawned by enabled Buildings do not
+            // participate in combat or resource generation; isolate their spawn RNG to the local
+            // render stream so they never consume the synced random sequence. Their IDs also move
+            // to the 0x8000... local visual track (see DXEntityOnPoolNewPatch / StateHasher's
+            // FlagIgnore for Colonist), so a different wander pattern per peer cannot desync.
+            var buildingType = Core.GameBridge.TypeBuilding;
+            if (buildingType != null)
+            {
+                var mSpawnColonists = AccessTools.Method(buildingType, Core.ObfuscatedSymbols.Method_Building_SpawnColonists, Type.EmptyTypes);
+                if (mSpawnColonists != null) yield return mSpawnColonists;
+            }
         }
 
         [HarmonyPrefix]
@@ -3769,6 +3898,34 @@ namespace TABCoopMod.Determinism
             if (!Sync.CoopSessionManager.IsSessionActive && !LockstepClock.IsDeterministicModeActive)
                 return;
             Core.GameBridge.EnforceDisabledCameraIntroForLevel(__instance);
+        }
+    }
+
+    /// <summary>
+    /// Suppresses Structure.HasNearEnemies during authorized lockstep command replay in Co-op
+    /// sessions so a 0.1-cell dynamic zombie drift on one peer never causes single-sided
+    /// rejection of an already-committed Upgrade or PlaceBuilding command.
+    /// </summary>
+    [HarmonyPatch]
+    public static class StructureNearEnemiesReplayPatch
+    {
+        public static System.Collections.Generic.IEnumerable<MethodBase> TargetMethods()
+        {
+            var structureType = Core.GameBridge.TypeStructure;
+            if (structureType == null) yield break;
+            var getter = AccessTools.PropertyGetter(structureType, "HasNearEnemies");
+            if (getter != null) yield return getter;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(ref bool __result)
+        {
+            if (Commands.CommandExecutor.IsReplayingCommand && Sync.CoopSessionManager.IsSessionActive)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
         }
     }
 }

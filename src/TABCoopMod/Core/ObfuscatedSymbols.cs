@@ -269,5 +269,30 @@ namespace TABCoopMod.Core
         public const string Field_ProgressWindow_Current       = "#=z9gBNlmJCE1ly";
         public const string Field_LevelSys_IntroCinematic      = "#=zfFXkD0aj1o9gF76ANQ==";
         public const string Field_LevelSys_ScreenAnim          = "#=z40N_lqqB8daJ";
+
+        // ====================================================================
+        // 17. Ambient Colonist / Structure Isolation (upstream v0.1.9 parity)
+        // --------------------------------------------------------------------
+        // ZX.Entities.Colonist (Worker_A / Worker_B) are ambient cosmetic walkers spawned by
+        // enabled Buildings. They carry no CLife, do not fight, do not block building placement
+        // and drive no resource production - yet they were being hashed, which inflated
+        // PosDrift/RmsDelta and made EntityCount wobble on each peer.
+        // ====================================================================
+        public const string Type_Colonist                      = "ZX.Entities.Colonist";
+        public const string Type_Building                      = "ZX.Entities.Building";
+        public const string Method_Building_SpawnColonists     = "#=z0RIVd3YfBl848VD92A==";
+
+        // ====================================================================
+        // 18. Local Build-Cursor Energy Preview (shared power-grid pollution)
+        // --------------------------------------------------------------------
+        // OCellAreaCursor.#=zwffgY1s=() writes a temporary +1 into the SHARED power-grid counter
+        // array for the cell the local player is hovering, and #=zglihyOZQi982dUVN0g==() removes it.
+        // Two peers therefore see DIFFERENT grids while a build preview is active, which makes
+        // CanPlaceAtCell disagree and single-sidedly rejects an already-committed build.
+        // ====================================================================
+        public const string Type_OCellAreaCursor               = "ZX.GUI.OCellAreaCursor";
+        public const string Field_OCellAreaCursor_LastEnergyCell = "#=zOgOjDSANK0WHtgVX_wzbxBg=";
+        public const string Method_OCellAreaCursor_ClearEnergyPreview = "#=zglihyOZQi982dUVN0g==";
+        public const string Method_OCellAreaCursor_UpdateVisual = "#=zwffgY1s=";
     }
 }

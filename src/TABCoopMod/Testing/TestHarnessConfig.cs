@@ -98,6 +98,16 @@ namespace TABCoopMod.Testing
         /// </summary>
         public static bool SerializeLogic { get; private set; } = true;
 
+        /// <summary>
+        /// DIAGNOSTIC. When greater than zero (TABCOOP_TRACE_FIRST_TICKS=N), each peer computes and
+        /// logs a full [TickTrace] digest for the first N ticks after every synced-level entry
+        /// instead of only every 60th tick. The two logs then show the exact tick on which the
+        /// position checksum first diverges — an immediate difference points at the math/integration
+        /// path, a slow accumulation points at the simulation logic. Local logging only; nothing
+        /// extra is sent to the peer.
+        /// </summary>
+        public static int TraceFirstTicks { get; private set; }
+
         /// <summary>True when the MCP control server is enabled (TABCOOP_CONTROL_PORT set).</summary>
         public static bool ControlEnabled => ControlPort > 0;
 
@@ -138,6 +148,7 @@ namespace TABCoopMod.Testing
             SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));
             ProjDump = Env("TABCOOP_PROJ_DUMP") == "1";
             SerializeLogic = Env("TABCOOP_SERIALIZE_LOGIC") != "0";
+            TraceFirstTicks = Math.Max(0, Math.Min(2000, ParseInt(Env("TABCOOP_TRACE_FIRST_TICKS"), 0)));
 
             string logDir = null;
             try { logDir = Path.GetDirectoryName(ModLogger.LogFilePath); } catch { }

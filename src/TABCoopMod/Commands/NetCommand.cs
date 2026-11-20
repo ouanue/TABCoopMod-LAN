@@ -167,6 +167,11 @@ namespace TABCoopMod.Commands
             bool prevReplaying = IsReplayingCommand;
             bool prevLocalBuild = IsReplayingLocalBuild;
             bool prevDet = LockstepClock.InDeterministicContext;
+            // The local build cursor writes a temporary +1 into the SHARED power-grid counter array
+            // for the hovered cell. That preview bonus must not leak into the authoritative command
+            // replay, or the two peers evaluate CanPlaceAtCell against different grids and one of
+            // them single-sidedly rejects the build.
+            object suspendedBuildCursor = GameBridge.SuspendLocalBuildCursorEnergyPreview();
             IsReplayingCommand = true;
             IsReplayingLocalBuild = TABCoopMod.Sync.CoopSessionManager.IsSessionActive
                 && netCmd.PlayerId == TABCoopMod.Patches.CommandInterceptor.LocalPlayerId
@@ -268,6 +273,7 @@ namespace TABCoopMod.Commands
                 LockstepClock.InDeterministicContext = prevDet;
                 IsReplayingLocalBuild = prevLocalBuild;
                 IsReplayingCommand = prevReplaying;
+                GameBridge.RestoreLocalBuildCursorEnergyPreview(suspendedBuildCursor);
             }
         }
 

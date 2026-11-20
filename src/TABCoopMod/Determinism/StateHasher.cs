@@ -29,6 +29,7 @@ namespace TABCoopMod.Determinism
         private const byte FlagIgnore = 1;
         private const byte FlagProjectile = 2;
         private const byte FlagZombie = 4;
+        private const byte FlagStructure = 8;
         private static readonly Dictionary<Type, byte> _entityTypeFlags = new Dictionary<Type, byte>();
 
         public struct EntityPosSample
@@ -38,6 +39,7 @@ namespace TABCoopMod.Determinism
             public float Y;
             public int Life;
             public bool IsDynamic;
+            public bool IsStructure;
         }
 
         public struct LevelStateSnapshotDigest
@@ -236,12 +238,16 @@ namespace TABCoopMod.Determinism
             if (!_entityTypeFlags.TryGetValue(entityType, out byte flags))
             {
                 string typeName = entityType.Name;
-                if (entityType == typeof(DXEntity) || string.Equals(typeName, "Raven", StringComparison.Ordinal))
+                if (entityType == typeof(DXEntity)
+                    || string.Equals(typeName, "Raven", StringComparison.Ordinal)
+                    || GameBridge.IsColonistType(entityType))
                     flags = FlagIgnore;
                 else if (IsProjectileName(typeName))
                     flags = FlagProjectile;
                 else if (GameBridge.IsZombieType(entityType))
                     flags = FlagZombie;
+                else if (GameBridge.IsStructureType(entityType))
+                    flags = FlagStructure;
                 _entityTypeFlags[entityType] = flags;
             }
             if ((flags & FlagIgnore) != 0)
@@ -268,10 +274,11 @@ namespace TABCoopMod.Determinism
             acc.EntityCount++;
 
             bool isDynamic = entity.PhysicalType == DXBodyType.Dynamic;
+            bool isStructure = (flags & FlagStructure) != 0;
             // Dynamic bodies carry position + HP for async alignment; static entities with HP
             // (walls/buildings) are sampled too so host-authoritative HP correction covers them.
-            if (acc.DynamicPositions != null && (isDynamic || lifeValue > 0))
-                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic });
+            if (acc.DynamicPositions != null && (isDynamic || isStructure || lifeValue > 0))
+                acc.DynamicPositions.Add(new EntityPosSample { Id = entity.ID, X = px, Y = py, Life = lifeValue, IsDynamic = isDynamic, IsStructure = isStructure });
 
             int bucketIdx = (int)(entity.ID & (ulong)(BucketCount - 1));
             long posMix = (long)entity.ID ^ (qx * 73856093L) ^ (qy * 19349663L);

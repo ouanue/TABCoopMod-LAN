@@ -212,6 +212,9 @@ namespace TABCoopMod.Sync
         private static string _pendingBroadcastChkText;
         private static int _pendingBroadcastSeed;
         private static long _pendingBroadcastIdCounter;
+        // The simulation-clock origin the Host used for this snapshot. The Client adopts it verbatim
+        // so both peers run the same number of Chipmunk steps (see LockstepClock.SharedClockOriginMs).
+        private static double _incomingClockOriginMs = double.NaN;
         private static bool _kickingLoadFade;
         private static int _loadFadeKickFrames;
         private static double _loadFadeKickStartTicks = -1.0;
@@ -331,6 +334,8 @@ namespace TABCoopMod.Sync
         private static double _lastCursorBroadcastTicks;
         private static int _lastCheckedSimTick = -1;
         private static bool _firstChecksumPosDumped;
+        private static bool _bucketDiffLogged;
+        private static int _segmentStartTick = -1;
         private static int _consecutiveProjOnlyMismatch;
         private static int _consecutiveHardMismatch;
         private static int _consecutivePosExceeded;
@@ -1061,6 +1066,13 @@ namespace TABCoopMod.Sync
                 ModLogger.Info($"[CoopSessionManager] Exporting Host snapshot to {savPath}...");
                 GameBridge.WriteSaveFile(savPath);
 
+                // Freeze the simulation-clock origin BEFORE exporting so the snapshot and the
+                // broadcast carry the exact same origin. The Client adopts it, which is what keeps
+                // "GameTime - LastGameTimeUpdatePhysics" identical on both peers.
+                double clockOrigin = DXGame.Current != null ? DXGame.Current.GameTime : double.NaN;
+                if (!double.IsNaN(clockOrigin))
+                    LockstepClock.ApplySharedClockOrigin(clockOrigin);
+
                 byte[] savBytes = File.ReadAllBytes(savPath);
                 string chkText = File.Exists(chkPath) ? File.ReadAllText(chkPath) : string.Empty;
                 int syncSeed = CurrentSessionSeed;
@@ -1261,6 +1273,7 @@ namespace TABCoopMod.Sync
             _gateWaitStartTicks = -1.0;
             _desyncDumped = false;
             _firstChecksumPosDumped = false;
+            _bucketDiffLogged = false;
             _networkGate = new TurnInputTickGate();
             LockstepClock.TickGate = _networkGate;
 
@@ -1300,6 +1313,8 @@ namespace TABCoopMod.Sync
             GameBridge.ClearLoadingFadeOverlay();
 
             ModLogger.Info($"[CoopSessionManager] Entered synced level at tick {cur} (inputDelay={InputDelayTicks}, role={(Transport.IsHost ? "Host" : "Client")}).");
+            _segmentStartTick = cur;
+            LockstepClock.LogBaselineFingerprint($"enter-synced/{(Transport.IsHost ? "Host" : "Client")}");
         }
 
         /// <summary>
@@ -1580,6 +1595,10 @@ namespace TABCoopMod.Sync
                             w.Write(chkText);
                             w.Write(syncSeed);
                             w.Write(idCounter);
+                            // Append-only: peers on an older build stop reading here, newer peers
+                            // adopt the Host's clock origin so both sides run identical physics steps.
+                            if (w.BaseStream.CanWrite)
+                                w.Write(LockstepClock.SharedClockOriginMs);
                         });
                         for (int i = 0; i < totalChunks; i++)
                         {
@@ -1917,7 +1936,32 @@ namespace TABCoopMod.Sync
                 EmitHostTurns(completedTick);
 
             if (completedTick > 0)
+            {
+                TryLogTickTrace(completedTick);
                 RunEpochHashAndChecksum(completedTick);
+            }
+        }
+
+        /// <summary>
+        /// DIAGNOSTIC ONLY (TABCOOP_TRACE_FIRST_TICKS=N). Logs a full digest for every tick within the
+        /// first N ticks of a synced level, so the two peers' logs reveal the exact tick on which the
+        /// position checksum first diverges. Nothing is sent over the wire.
+        /// </summary>
+        private static void TryLogTickTrace(int completedTick)
+        {
+            int n = Testing.TestHarnessConfig.TraceFirstTicks;
+            if (n <= 0 || _segmentStartTick < 0) return;
+            int rel = completedTick - _segmentStartTick;
+            if (rel < 0 || rel > n) return;
+            try
+            {
+                var d = StateHasher.ComputeDigest();
+                ModLogger.Info($"[TickTrace] rel={rel} tick={d.SimTick} Pos={d.PosChecksum:X16} Coarse={d.CoarsePosChecksum:X16} " +
+                               $"Life={d.LifeChecksum:X16} Aggro={d.ZombieAggroChecksum:X16}({d.AggroZombieCount}) Proj={d.ProjectileChecksum:X16} " +
+                               $"Prod={d.ProductionChecksum:X16} Resv={d.ReservationChecksum:X16} entities={d.EntityCount} proj={d.ProjectileCount} " +
+                               $"time={d.GameTimeMs} phys={d.PhysicsUpdates}");
+            }
+            catch (Exception ex) { ModLogger.Warn($"[TickTrace] failed: {ex.Message}"); }
         }
 
         private static void FlushOutgoingClientCommands()
@@ -2421,7 +2465,17 @@ namespace TABCoopMod.Sync
                     _incomingCheckContent = r.ReadString();
                     _incomingRandomSeed = r.ReadInt32();
                     _incomingEntityIdCounter = r.ReadInt64();
-                    ModLogger.Info($"[CoopSessionManager] Receiving Snapshot from Host ({_expectedSaveBytes:N0} bytes, {_expectedChunks} chunks, seed={_incomingRandomSeed}, idCounter={_incomingEntityIdCounter}); buffered={_incomingChunks.Count}.");
+                    // Append-only field: present only when the Host runs a newer build.
+                    _incomingClockOriginMs = r.BaseStream.Position + 8 <= r.BaseStream.Length ? r.ReadDouble() : double.NaN;
+                    if (!double.IsNaN(_incomingClockOriginMs))
+                    {
+                        LockstepClock.ApplySharedClockOrigin(_incomingClockOriginMs);
+                        ModLogger.Info($"[CoopSessionManager] Received Snapshot from Host ({_expectedSaveBytes:N0} bytes, {_expectedChunks} chunks, seed={_incomingRandomSeed}, idCounter={_incomingEntityIdCounter}, clockOrigin={_incomingClockOriginMs:F1}ms); buffered={_incomingChunks.Count}.");
+                    }
+                    else
+                    {
+                        ModLogger.Info($"[CoopSessionManager] Receiving Snapshot from Host ({_expectedSaveBytes:N0} bytes, {_expectedChunks} chunks, seed={_incomingRandomSeed}, idCounter={_incomingEntityIdCounter}); buffered={_incomingChunks.Count}.");
+                    }
                     GameBridge.ShowTopBanner("Receiving Map Snapshot from Host...", Color.Cyan, 3000);
                     TryAssembleSnapshot();
                     break;
@@ -2798,6 +2852,10 @@ namespace TABCoopMod.Sync
                 w.Write(ownedUnits[i].X);
                 w.Write(ownedUnits[i].Y);
             }
+
+            // Appended after every pre-existing field so a peer on an older build still parses the
+            // report correctly (the reader guards on remaining length). Diagnostic only; never hashed.
+            w.Write(d.PhysicsUpdates);
         }
 
         private static TickDigestRecord ReadDigestReport(BinaryReader r)
@@ -2848,6 +2906,9 @@ namespace TABCoopMod.Sync
                     }
                 }
             }
+            // Optional trailer (present only from builds that append it).
+            if (r.BaseStream.Position + 4 <= r.BaseStream.Length)
+                d.PhysicsUpdates = r.ReadUInt32();
             return new TickDigestRecord { Digest = d, Summary = summary, OwnedUnits = ownedUnits };
         }
 
@@ -2979,7 +3040,12 @@ namespace TABCoopMod.Sync
                 {
                     _consecutiveEconMismatch = econCoreDiff ? _consecutiveEconMismatch + 1 : 0;
                     _consecutiveStructuralMismatch = structuralDiff ? _consecutiveStructuralMismatch + 1 : 0;
-                    bool substantiveDiff = econCoreDiff || lifeDiff || absEntityDelta > 2;
+                    // Ported from upstream v0.1.9: a small entity-count delta (a couple of transient
+                    // spawns/deaths) must not start the long-period realign timer — that used to fire a
+                    // full-game reload every 5 minutes even when nothing structural had changed.
+                    bool substantiveDiff = econCoreDiff || lifeDiff
+                        || _consecutiveEconMismatch >= 3
+                        || absEntityDelta > entityTol;
                     if (substantiveDiff)
                     {
                         if (_divergedSinceTicks < 0) _divergedSinceTicks = now;
@@ -3091,7 +3157,11 @@ namespace TABCoopMod.Sync
                     ModLogger.Warn($"[StateChecksum] SOFT POS DRIFT at Tick {tick} (Life/Aggro/Entity/Proj/Econ MATCH! CoarseDiff={coarsePosDiff}, mode={EffectiveResyncMode}).");
                 ModLogger.Info($"[StateChecksum]   Host   : {hostSummary ?? "(none)"}");
                 ModLogger.Info($"[StateChecksum]   Client : {clientSummary ?? "(none)"}");
-
+                if (!_bucketDiffLogged)
+                {
+                    _bucketDiffLogged = true;
+                    LogPosBucketDiff(tick, in host, in client);
+                }
                 if (IsStrictMode)
                 {
                     if (now - _lastPosSyncSentTicks >= 2000.0)
@@ -3670,6 +3740,37 @@ namespace TABCoopMod.Sync
                     ModLogger.Warn($"[AsyncPosAlign] Async decompress/scan failed: {ex.Message}");
                 }
             });
+        }
+
+        /// <summary>
+        /// DIAGNOSTIC ONLY. On the first soft position drift of a segment, reports which position
+        /// buckets differ. Bucket index == (entity.ID &amp; (bucketCount-1)), so the numbers point at
+        /// the entity ID ranges that diverged first without dumping every entity.
+        /// </summary>
+        private static void LogPosBucketDiff(int tick, in StateHasher.LevelStateSnapshotDigest host, in StateHasher.LevelStateSnapshotDigest client)
+        {
+            try
+            {
+                var hb = host.PosBuckets;
+                var cb = client.PosBuckets;
+                if (hb == null || cb == null)
+                {
+                    ModLogger.Info($"[BucketDiff] Tick {tick}: buckets unavailable (host={hb?.Length ?? 0}, client={cb?.Length ?? 0}).");
+                    return;
+                }
+                int n = Math.Min(hb.Length, cb.Length);
+                int diff = 0;
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < n; i++)
+                {
+                    if (hb[i] == cb[i]) continue;
+                    diff++;
+                    if (diff <= 8) sb.Append(' ').Append(i);
+                }
+                string tail = diff > 8 ? " ..." : string.Empty;
+                ModLogger.Info($"[BucketDiff] Tick {tick}: {diff}/{n} pos buckets differ; first differing buckets:{sb}{tail} (bucket index == entity.ID & (n-1)).");
+            }
+            catch (Exception ex) { ModLogger.Warn($"[BucketDiff] failed: {ex.Message}"); }
         }
 
         private static void DumpHostEntitiesOnDesync(int tick)
