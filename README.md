@@ -20,6 +20,13 @@
 2. 双击运行。若 Windows 弹出「已保护你的电脑」，点**更多信息 → 仍要运行**；弹出 UAC 时点**是**。
 3. 脚本会**自动定位游戏目录**、下载最新发行包、备份原配置、解压覆盖、并放行 TCP 27099 防火墙，跑完停在窗口上显示本机地址。
 
+脚本在安装前后各做一次把关，用来避免「看起来装好了、其实还是旧版」：
+
+- **装之前**检测 `TheyAreBillions.exe` 是否还在跑。在跑就**直接中止**——游戏运行时 `TABCoopMod.dll` 被进程锁住，`Copy-Item -Force` 可能不报错却没换成功。
+- **装之后**校验 `TABCoopMod.dll` 的字节数与 SHA256，对不上会明确打印实际值、期望值和常见原因。
+
+脚本源码在 [`scripts/TABCoopMod_LAN_installer.ps1`](scripts/TABCoopMod_LAN_installer.ps1)（`.bat` 只是把它 base64 打包成自解压引导器；改了脚本要重新生成 `.bat` 并同步里面的 `$ExpectedZipSize`/`$ExpectedDllSize`/`$ExpectedDllHash`/`$ExpectedBuild`）。
+
 ### 方式 B：手动解压
 
 1. 完全关闭游戏。
