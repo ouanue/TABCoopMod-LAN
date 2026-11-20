@@ -194,7 +194,11 @@ $guideText = @"
          同种子、零输入）从「约一半运行会漂移」变为连续多轮全绿。
        - 想要更高帧率可以给游戏设环境变量 TABCOOP_SERIALIZE_LOGIC=0，
          关掉逻辑 tick 的串行化（物理串行不可关，关掉必然漂移）。
-       - 如需强制同步单线程，可给游戏设环境变量 TABCOOP_DISABLE_ASYNC_TICK=1。
+       - 本版本（v6.1）起，异步 tick 重叠默认关闭。想要重叠（换帧率、
+         但实测会重新开始漂移）可设 TABCOOP_ENABLE_ASYNC_TICK=1。
+       - 日志里每个校验周期都带 phys=物理步数，两端同 tick 必须相同；
+         若出现 PHYS-UPDATES-MISMATCH，说明两端物理步进不一致，请把
+         TABCoopMod.log 发给开发者。
     5. 联机时只有十几帧：
        - 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络好坏无关。
        - 串行化并行循环会让物理步进变慢：17k 实体的后期存档实测每帧 55~80ms

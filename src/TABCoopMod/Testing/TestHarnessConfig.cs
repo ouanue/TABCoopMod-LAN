@@ -58,6 +58,21 @@ namespace TABCoopMod.Testing
         /// <summary>When true (TABCOOP_DISABLE_ASYNC_TICK=1), forces synchronous single-thread simulation ticks even in co-op.</summary>
         public static bool DisableAsyncTick { get; private set; }
 
+        /// <summary>
+        /// When true (TABCOOP_ENABLE_ASYNC_TICK=1), allows the logic tick to be pipelined on the
+        /// _TaskLogic continuation thread while RenderFrame/Present runs on MainThread.
+        ///
+        /// DEFAULT IS FALSE. The overlapped tick runs the engine's UpdateGameLogic body on a
+        /// thread-pool continuation that interleaves with the render thread's DXScene pass, so
+        /// per-machine thread scheduling decides when entity positions are sampled. Live co-op
+        /// sessions then show sub-pixel position divergence within ~60-200 ticks of every segment
+        /// start, which snowballs into MissingOnClient and a snapshot rebuild every 1-4 minutes.
+        /// Running the tick synchronously keeps physics on the main thread and matches the
+        /// replay-deterministic path, at the cost of capping throughput near 12-30 fps on a
+        /// late-game 17k-entity save.
+        /// </summary>
+        public static bool EnableAsyncTick { get; private set; }
+
         /// <summary>Physics step-end quantization grid inverse step (e.g. 256 => 1/256 cell). 0 disables.</summary>
         public static int PhysicsQuantScale { get; private set; } = DefaultPhysicsQuantScale;
 
@@ -117,6 +132,7 @@ namespace TABCoopMod.Testing
             ResyncMode = Env("TABCOOP_RESYNC_MODE") ?? "async_align";
             ResyncCooldownMs = ParseInt(Env("TABCOOP_RESYNC_COOLDOWN_MS"), -1);
             DisableAsyncTick = Env("TABCOOP_DISABLE_ASYNC_TICK") == "1";
+            EnableAsyncTick = Env("TABCOOP_ENABLE_ASYNC_TICK") == "1";
             PhysicsQuantScale = Math.Max(0, ParseInt(Env("TABCOOP_PHYSICS_QUANT"), DefaultPhysicsQuantScale));
             SimMinFrameMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_MIN_FRAME_MS"), 0));
             SimExtraTickMs = Math.Max(0, ParseInt(Env("TABCOOP_SIM_EXTRA_TICK_MS"), 0));

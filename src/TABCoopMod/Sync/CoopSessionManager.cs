@@ -2260,7 +2260,8 @@ namespace TABCoopMod.Sync
                 $"Aggro={digest.ZombieAggroChecksum:X16}({digest.AggroZombieCount}) Proj={digest.ProjectileChecksum:X16} " +
                 $"Prod={digest.ProductionChecksum:X16} Resv={digest.ReservationChecksum:X16} " +
                 $"(entities={digest.EntityCount} proj={digest.ProjectileCount} queued={digest.QueuedOrderCount} " +
-                $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs})";
+                $"res={digest.Gold}/{digest.Wood}/{digest.Stone}/{digest.Iron}/{digest.Oil} time={digest.GameTimeMs} " +
+                $"phys={digest.PhysicsUpdates})";
 
             // Diagnostic (TABCOOP_PROJ_DUMP=1): both peers log the exact projectile ID set hashed at
             // this epoch's SimTick, so a host/client diff names the diverging arrows directly.
@@ -2920,7 +2921,14 @@ namespace TABCoopMod.Sync
                     _consecutiveHardMismatch = 0;
                     _consecutivePosExceeded = 0;
                     ResetTieredResyncState();
-                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}).");
+                    // phys= is diagnostic-only and NOT part of FullHash, so a mismatch here on an
+                    // otherwise perfect MATCH epoch proves the two peers ran a different number of
+                    // Chipmunk steps while every hashed channel still agreed -- the classic signature
+                    // of a sub-pixel position divergence that has not yet reached the coarse grid.
+                    string physNote = host.PhysicsUpdates == client.PhysicsUpdates
+                        ? string.Empty
+                        : $" PHYS-UPDATES-MISMATCH host={host.PhysicsUpdates} client={client.PhysicsUpdates} delta={host.PhysicsUpdates - client.PhysicsUpdates}";
+                    ModLogger.Info($"[StateChecksum] Tick {tick} MATCH (0x{host.FullHash:X16}) with Client({senderId}) phys={host.PhysicsUpdates}/{client.PhysicsUpdates}.{physNote}");
                     continue;
                 }
 

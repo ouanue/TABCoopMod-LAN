@@ -1421,10 +1421,13 @@ namespace TABCoopMod.Determinism
 
             DiagLastWantedTicks = maxTicksThisFrame;
 
-            // Pipeline 1 tick asynchronously in _TaskLogic while RenderFrame/Present runs on MainThread
-            // ONLY when running 1 tick this frame; multi-tick catchup must execute synchronously so
-            // slow late-game clients are not permanently capped to 1 tick per render frame.
+            // Async overlap is OPT-IN (TABCOOP_ENABLE_ASYNC_TICK=1). Running the logic tick on the
+            // _TaskLogic continuation while RenderFrame/Present runs on MainThread lets per-machine
+            // thread scheduling decide when entity positions are sampled, which shows up in live
+            // co-op as sub-pixel pos drift within ~60-200 ticks of every segment start and then a
+            // MissingOnClient snapshot rebuild every 1-4 minutes. Sync ticks match the replay path.
             bool canOverlapAsync = inCoop
+                && Testing.TestHarnessConfig.EnableAsyncTick
                 && !Testing.TestHarnessConfig.DisableAsyncTick
                 && !Testing.DeterministicReplayVerifier.IsRunning
                 && __instance.GameSpeed <= 1.05

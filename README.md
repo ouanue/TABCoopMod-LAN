@@ -130,6 +130,7 @@ Get-NetIPAddress -AddressFamily IPv6 |
 | 房间码显示的是内网地址、异地连不上 | 异地联机需先加入同一虚拟局域网（Radmin 等），房间码会变为 `26.x.x.x` |
 | 联机每隔一两分钟就「卡一下 / 断线重连」 | 这是锁步失步后的**自动快照重建**（日志 `Auto-resync / MissingOnClient`），不是掉线。**根因已在 v6 修掉**：引擎 `DXVision.dll` 的 `DXHelper_Task.For` 按 `minIterationsForConcurrency` / `maxCores` 把循环体切块后多线程执行，共享累加器、broadphase 插入、arbiter 候选的访问顺序取决于 CPU 核数与线程调度，两台机器的浮点舍入不同，逐 tick 累积成位置漂移。本版在确定性沙箱内把三个 `For` 重载全部改成串行循环，A/A 对照从约 50% 运行漂移变为 18 次连续全绿、逐 epoch 校验零差异。详见 [`docs/13_LAN_MULTIPLAYER.md`](docs/13_LAN_MULTIPLAYER.md) §6 |
 | 联机时只有十几帧 | 锁步帧率由「每帧跑几个逻辑 tick」决定，与显卡/网络无关。v6 为了消除失步把引擎并行循环序列化了，代价是 17k 实体后期存档约 12~17fps（`physFor1 ≈ 6~9ms/tick`）。想要更高帧率可设环境变量 `TABCOOP_SERIALIZE_LOGIC=0`，只关掉**逻辑 tick** 的串行化；物理串行不能关，关掉必然漂移 |
+| 联机仍每几分钟重建一次快照 | v6.1 起**异步 tick 重叠默认关闭**（`canOverlapAsync` 改为 opt-in，只有 `TABCOOP_ENABLE_ASYNC_TICK=1` 才开）。重叠会让逻辑 tick 在 `_TaskLogic` 续体线程上跑引擎 `UpdateGameLogic`，与主线程渲染 pass 交错，实体位置采样时刻由每台机器的线程调度决定 —— 实时联机表现为每段 60~200 tick 内出现亚像素漂移。A/A 测试一直用 `TABCOOP_DISABLE_ASYNC_TICK=1` 关着它，所以此前的连绿不能证明开着重叠也是确定的。日志里 `MATCH … phys=A/B` 两数相同、且没有 `PHYS-UPDATES-MISMATCH`，说明两端物理步进一致，问题不在物理步数 |
 
 ---
 

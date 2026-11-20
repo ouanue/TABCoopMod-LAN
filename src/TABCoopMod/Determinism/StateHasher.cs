@@ -54,6 +54,15 @@ namespace TABCoopMod.Determinism
             public ulong HardHash;
             public ulong FullHash;
 
+            /// <summary>
+            /// Diagnostic only, NOT part of any hash: DXPhysicWorld.NUpdates (the engine's cumulative
+            /// physics-step counter) as observed when this epoch's digest was built. Both peers must
+            /// show the same value at the same SimTick; a mismatch proves one side skipped or ran an
+            /// extra Chipmunk step, which is the first thing to rule out when positions diverge
+            /// sub-pixel while every other channel still matches.
+            /// </summary>
+            public uint PhysicsUpdates;
+
             /// <summary>Diagnostic only (TABCOOP_PROJ_DUMP=1): projectile IDs hashed in this epoch.</summary>
             public List<ulong> ProjectileIds;
 
@@ -337,6 +346,10 @@ namespace TABCoopMod.Determinism
             digest.LifeBuckets = acc.LifeBuckets;
             digest.EntityBuckets = acc.EntityBuckets;
             digest.ProjectileIds = acc.ProjectileIds;
+            // Diagnostic only — deliberately NOT mixed into HardHash/FullHash (that would break wire
+            // compatibility with a peer on an older build and would turn a pure physics-step-count
+            // difference into a desync by itself).
+            digest.PhysicsUpdates = DXPhysicWorld.NUpdates;
 
             Mix(acc.EntityCount);
             Mix(acc.ProjectileCount);
