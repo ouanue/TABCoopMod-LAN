@@ -55,16 +55,22 @@
    - `StructureNearEnemiesReplayPatch`：回放建造指令时忽略 `HasNearEnemies`，避免"游荡僵尸距建筑差 0.07 格"导致单边拒建 → 资源分叉 → `econ x3` 重建。
    - 建造预览供电圈隔离（`Suspend/RestoreLocalBuildCursorEnergyPreview`）——本地预览供电圈会让两端 `CanPlaceAtCell` 结论相反。
    - 收紧 5 分钟兜底重载判据（上游 `substantiveDiff` 口径），小幅实体数差不再触发全量重建。
-5. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
+5. **跨 CPU 数学末位差异是同机测不出的最后一类分歧（v6.3 已修）**：
+   - 引擎寻路与几何计算用 `Math.Pow(x,2)` / `Math.Pow(x,0.5)`，而 `Math.Pow` 由**平台 CRT 实现**，不保证在每颗 CPU 上都正确舍入：实测 `Math.Pow(x,2)` 与 `x*x` 在 20 万次采样里有 108~421 次 1-ULP 差异。
+   - 两台机器的 CPU/CRT 一旦不同 → 路径代价差 1 ULP → 大小比较翻转 → 选到不同路径 → 实体移动差零点几格 → 逐 tick 放大成可见的位置漂移。
+   - **按构造就抓不到**：同机两个 peer 跑同一颗 CPU、同一份 CRT，`Math.Pow` 结果逐位相同 ⇒ 同机 A/A 永远全绿（我们连测 18 轮 + v6.3 后 3 轮），只有双机才暴露。这解释了"单机测多少遍都稳、联机必漂"。
+   - 修复：新增 `Patches/DeterministicMathPatch.cs`（HarmonyTranspiler）把常量指数的 `Math.Pow` 改写成 CPU 无关的精确形式（`x*x` / `Math.Sqrt` / 连乘），覆盖 4 个方法共 13 个调用点；`Noise::GetOctaveNoise`（指数是运行时整数且实测精确）与 `DXHelper_Trajectory::Lineal`（指数是 `1+accel`）故意不动；非确定模式下退回原始 `Math.Pow`，单机行为不变。
+   - 已核实引擎其余超越函数调用都在不进模拟的路径上（`DXMatrix*::Rotate`、`DXObject::RotateAt`、`DXHelper_Random::RandomLocationsInCircle`（无调用点）、`DXTransition::FactorByTime`、`ClipperLib::*`、`DXHelper_Image::*`）；`TheyAreBillions.exe` 侧只有 IEEE 精确的 `Math.Round`/`Floor`/`Ceiling`。
+6. **原生 Chipmunk 求解器极微小漂移 + `Auto-resync` 自愈**：
    - 在密集重叠僵尸群下，非托管 `DXPhysicsNative.Space_Step` 偶发 `1e-4` 级别速度微差，累积数十帧后可能产生约 `0.002` 格位置偏离（已通过 `PRE/POST DXPhysicWorld.Step` 验证全部托管输入完全一致）。
    - 已启用的 `Auto-resync` 能在检测到 `StateHash` 不一致后约 **3 秒内**自动重建并恢复一致状态继续锁步，且二次读档已无 `CShadow` NRE。
-6. **纯视觉/环境实体不参与对局状态哈希**：
+7. **纯视觉/环境实体不参与对局状态哈希**：
    - 裸 `DXVision.DXEntity`（受击飙血/弹花贴图）与 `Raven`（环境飞鸟）仅作用于视觉表现，在 `StateHasher` 与 `DeterministicReplayVerifier.DumpPositions` 中已明确跳过。
-7. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
+8. **同进程重载 (`inproc`) 仅用于崩溃/资源清理校验**：
    - `PrepareForProgrammaticLoad()` 已彻底消除关卡内二次读档 `CShadow` NRE，但 `inproc` 模式下引擎仍存在跨局静态残留实体总数偏差；确定性比对统一以**双进程模式**为准。
-8. **新开局动态随机地图种子（已接入）**：
+9. **新开局动态随机地图种子（已接入）**：
    - `CoopSessionManager.RollNewGameSeed()` 在正式联机会话（非 `TABCOOP_TEST=1`）下会在建房、点选[新建生存游戏]/[自定义地图]及重返大厅时动态滚动 `CurrentSessionSeed`，使联机新开局每次随机换图，并通过快照/`HostSyncBarrier` 将同一种子精确同步给所有客机；自动化回放与固定种子校验（`TestHarnessConfig.Enabled`）仍保留 `SyncSeed = 20261109`。
-9. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
+10. **未实机覆盖项（需人工桌面/双账号参与，不可假设已完成）**：
    - **真人键鼠操作全链路扩展**：大波尸潮混战下客机位置平滑体感、Shift 连续建造与全部建筑/部队热键组合的长期稳定性；
    - **Steam Lobby P2P 跨机联机**：`SteamP2PTransport`（内嵌 Steamworks.NET v10）需要双 Steam 账号或跨机实测。
 
